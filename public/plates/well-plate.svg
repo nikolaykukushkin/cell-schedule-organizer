@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Shadow -->
+  <rect x="7" y="50" width="50" height="6" rx="3" fill="#00000008"/>
+  <!-- Plate body -->
+  <rect x="4" y="12" width="56" height="40" rx="4" fill="#e8edf2" stroke="#a0aab4" stroke-width="1"/>
+  <!-- Top face -->
+  <rect x="4" y="12" width="56" height="4" rx="2" fill="#d0d8e0"/>
+  <!-- Wells grid 4x6 -->
+  <g fill="#fff" stroke="#b0b8c0" stroke-width="0.6">
+    <circle cx="14" cy="23" r="3"/><circle cx="23" cy="23" r="3"/><circle cx="32" cy="23" r="3"/><circle cx="41" cy="23" r="3"/><circle cx="50" cy="23" r="3"/>
+    <circle cx="14" cy="32" r="3"/><circle cx="23" cy="32" r="3"/><circle cx="32" cy="32" r="3"/><circle cx="41" cy="32" r="3"/><circle cx="50" cy="32" r="3"/>
+    <circle cx="14" cy="41" r="3"/><circle cx="23" cy="41" r="3"/><circle cx="32" cy="41" r="3"/><circle cx="41" cy="41" r="3"/><circle cx="50" cy="41" r="3"/>
+  </g>
+  <!-- Media in wells -->
+  <g fill="#f8c4c4" opacity="0.4">
+    <circle cx="14" cy="23" r="2"/><circle cx="23" cy="23" r="2"/><circle cx="32" cy="23" r="2"/><circle cx="41" cy="23" r="2"/><circle cx="50" cy="23" r="2"/>
+    <circle cx="14" cy="32" r="2"/><circle cx="23" cy="32" r="2"/><circle cx="32" cy="32" r="2"/><circle cx="41" cy="32" r="2"/><circle cx="50" cy="32" r="2"/>
+    <circle cx="14" cy="41" r="2"/><circle cx="23" cy="41" r="2"/><circle cx="32" cy="41" r="2"/><circle cx="41" cy="41" r="2"/><circle cx="50" cy="41" r="2"/>
+  </g>
+</svg>

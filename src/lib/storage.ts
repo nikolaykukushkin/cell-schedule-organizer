@@ -1,0 +1,116 @@
+import { Experiment, CellPopulation, SubEvent, Connection } from '@/types';
+
+const EXPERIMENTS_KEY = 'cell-scheduler:experiments';
+const POPULATIONS_KEY = 'cell-scheduler:populations';
+const SUBEVENTS_KEY = 'cell-scheduler:subevents';
+const CONNECTIONS_KEY = 'cell-scheduler:connections';
+
+function getItems<T>(key: string): T[] {
+  if (typeof window === 'undefined') return [];
+  const raw = localStorage.getItem(key);
+  return raw ? JSON.parse(raw) : [];
+}
+
+function setItems<T>(key: string, items: T[]): void {
+  localStorage.setItem(key, JSON.stringify(items));
+}
+
+// Experiments
+export function getExperiments(): Experiment[] {
+  return getItems<Experiment>(EXPERIMENTS_KEY);
+}
+
+export function getExperiment(id: string): Experiment | undefined {
+  return getExperiments().find(e => e.id === id);
+}
+
+export function saveExperiment(experiment: Experiment): void {
+  const all = getExperiments();
+  const idx = all.findIndex(e => e.id === experiment.id);
+  if (idx >= 0) all[idx] = experiment;
+  else all.push(experiment);
+  setItems(EXPERIMENTS_KEY, all);
+}
+
+export function deleteExperiment(id: string): void {
+  setItems(EXPERIMENTS_KEY, getExperiments().filter(e => e.id !== id));
+  const pops = getPopulations(id);
+  pops.forEach(p => deletePopulation(p.id));
+  setItems(CONNECTIONS_KEY, getItems<Connection>(CONNECTIONS_KEY).filter(c => c.experimentId !== id));
+}
+
+// Populations
+export function getPopulations(experimentId: string): CellPopulation[] {
+  return getItems<CellPopulation>(POPULATIONS_KEY).filter(p => p.experimentId === experimentId);
+}
+
+export function savePopulation(population: CellPopulation): void {
+  const all = getItems<CellPopulation>(POPULATIONS_KEY);
+  const idx = all.findIndex(p => p.id === population.id);
+  if (idx >= 0) all[idx] = population;
+  else all.push(population);
+  setItems(POPULATIONS_KEY, all);
+}
+
+export function deletePopulation(id: string): void {
+  setItems(POPULATIONS_KEY, getItems<CellPopulation>(POPULATIONS_KEY).filter(p => p.id !== id));
+  setItems(SUBEVENTS_KEY, getItems<SubEvent>(SUBEVENTS_KEY).filter(e => e.populationId !== id));
+}
+
+// SubEvents
+export function getSubEvents(populationId: string): SubEvent[] {
+  return getItems<SubEvent>(SUBEVENTS_KEY).filter(e => e.populationId === populationId);
+}
+
+export function getAllSubEvents(experimentId: string): SubEvent[] {
+  const popIds = new Set(getPopulations(experimentId).map(p => p.id));
+  return getItems<SubEvent>(SUBEVENTS_KEY).filter(e => popIds.has(e.populationId));
+}
+
+export function saveSubEvent(event: SubEvent): void {
+  const all = getItems<SubEvent>(SUBEVENTS_KEY);
+  const idx = all.findIndex(e => e.id === event.id);
+  if (idx >= 0) all[idx] = event;
+  else all.push(event);
+  setItems(SUBEVENTS_KEY, all);
+}
+
+export function deleteSubEvent(id: string): void {
+  setItems(SUBEVENTS_KEY, getItems<SubEvent>(SUBEVENTS_KEY).filter(e => e.id !== id));
+}
+
+// Connections
+export function getConnections(experimentId: string): Connection[] {
+  return getItems<Connection>(CONNECTIONS_KEY).filter(c => c.experimentId === experimentId);
+}
+
+export function saveConnection(connection: Connection): void {
+  const all = getItems<Connection>(CONNECTIONS_KEY);
+  const idx = all.findIndex(c => c.id === connection.id);
+  if (idx >= 0) all[idx] = connection;
+  else all.push(connection);
+  setItems(CONNECTIONS_KEY, all);
+}
+
+export function deleteConnection(id: string): void {
+  setItems(CONNECTIONS_KEY, getItems<Connection>(CONNECTIONS_KEY).filter(c => c.id !== id));
+}
+
+// Export/Import
+export function exportExperiment(experimentId: string): string {
+  return JSON.stringify({
+    experiment: getExperiment(experimentId),
+    populations: getPopulations(experimentId),
+    subEvents: getAllSubEvents(experimentId),
+    connections: getConnections(experimentId),
+  }, null, 2);
+}
+
+export function importExperiment(json: string): Experiment {
+  const data = JSON.parse(json);
+  saveExperiment(data.experiment);
+  data.populations.forEach((p: CellPopulation) => savePopulation(p));
+  data.subEvents.forEach((e: SubEvent) => saveSubEvent(e));
+  data.connections.forEach((c: Connection) => saveConnection(c));
+  return data.experiment;
+}

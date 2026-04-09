@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Shadow -->
+  <ellipse cx="33" cy="58" rx="18" ry="3" fill="#00000008"/>
+  <!-- Flask body -->
+  <path d="M22 8 L22 22 L8 52 Q6 56 10 56 L54 56 Q58 56 56 52 L42 22 L42 8 Z"
+    fill="#e8f0fa" stroke="#a0b8d0" stroke-width="1"/>
+  <!-- Neck -->
+  <rect x="21" y="4" width="22" height="6" rx="2" fill="#d4e4f7" stroke="#a0b8d0" stroke-width="0.8"/>
+  <!-- Cap -->
+  <rect x="24" y="2" width="16" height="3" rx="1.5" fill="#e05555"/>
+  <!-- Media level -->
+  <path d="M14 40 L22 22 L42 22 L50 40 Q54 52 52 54 L12 54 Q10 52 14 40 Z"
+    fill="#f8c4c4" opacity="0.3"/>
+  <!-- Highlight -->
+  <path d="M24 22 L24 10" stroke="#ffffff" stroke-width="1" opacity="0.4"/>
+  <!-- Graduation marks -->
+  <line x1="16" y1="36" x2="20" y2="36" stroke="#a0b8d0" stroke-width="0.5"/>
+  <line x1="13" y1="44" x2="17" y2="44" stroke="#a0b8d0" stroke-width="0.5"/>
+</svg>
