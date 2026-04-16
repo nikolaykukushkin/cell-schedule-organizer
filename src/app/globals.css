@@ -18,6 +18,9 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+  /* Prevent mobile browsers from zooming on double-tap or pinch within the calendar UI. */
+  touch-action: pan-x pan-y;
+  -webkit-text-size-adjust: 100%;
 }
 
 /* Smooth transitions for interactive elements */

@@ -17,6 +17,8 @@ interface NewPopulationDialogProps {
     plateCount: number;
     cellDensity: string;
     experimenter: string;
+    experimentLabel: string;
+    comments: string;
   }) => void;
   onCancel: () => void;
 }
@@ -29,6 +31,8 @@ export default function NewPopulationDialog({ startDate, endDate, onConfirm, onC
   const [plateCount, setPlateCount] = useState(4);
   const [cellDensity, setCellDensity] = useState('');
   const [experimenter, setExperimenter] = useState('');
+  const [experimentLabel, setExperimentLabel] = useState('');
+  const [comments, setComments] = useState('');
 
   const cellLineSuggestions = storage.getAllCellLines();
   const nameSuggestions = storage.getAllExperimentNames();
@@ -43,6 +47,8 @@ export default function NewPopulationDialog({ startDate, endDate, onConfirm, onC
       plateCount,
       cellDensity,
       experimenter: experimenter.trim(),
+      experimentLabel: experimentLabel.trim(),
+      comments: comments.trim(),
     });
   };
 
@@ -56,6 +62,18 @@ export default function NewPopulationDialog({ startDate, endDate, onConfirm, onC
           <div>
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Experiment Name</label>
             <AutocompleteInput value={name} onChange={setName} suggestions={nameSuggestions} placeholder="e.g. CRE-luc timecourse" />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Experiment ID</label>
+            <input
+              type="text"
+              autoComplete="off"
+              value={experimentLabel}
+              onChange={e => setExperimentLabel(e.target.value)}
+              placeholder="e.g. Exp 042"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none"
+            />
           </div>
 
           <div className="grid grid-cols-3 gap-2">
@@ -134,6 +152,18 @@ export default function NewPopulationDialog({ startDate, endDate, onConfirm, onC
               />
               <span className="text-sm text-slate-500 font-semibold">{densityUnit(plateType)}</span>
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Comments</label>
+            <textarea
+              autoComplete="off"
+              value={comments}
+              onChange={e => setComments(e.target.value)}
+              placeholder="Notes about this experiment..."
+              rows={2}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none"
+            />
           </div>
 
           <div className="flex gap-3 pt-2">

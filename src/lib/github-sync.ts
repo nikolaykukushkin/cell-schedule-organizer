@@ -15,6 +15,7 @@ function classifyEvent(label: string): string {
 
 /** Generate a single markdown file for a population and its events */
 function generateMarkdown(pop: CellPopulation, popEvents: SubEvent[]): { filename: string; content: string } {
+  const expLabel = pop.experimentLabel || '';
   const slug = `${slugify(pop.name)}-${pop.startDate}`;
   const topics = ['scheduling', pop.cellLine, pop.name].filter(Boolean);
 
@@ -29,6 +30,9 @@ function generateMarkdown(pop: CellPopulation, popEvents: SubEvent[]): { filenam
 
   const content = `---
 date: ${pop.startDate}
+seed_date: ${pop.startDate}
+harvest_date: ${pop.endDate}
+experiment_id: ${expLabel}
 slug: ${slug}
 topics: [${topics.map(t => `"${t}"`).join(', ')}]
 source: scheduler

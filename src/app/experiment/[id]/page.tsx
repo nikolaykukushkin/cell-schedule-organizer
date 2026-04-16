@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ExperimentGroup as Experiment } from '@/types';
 import * as storage from '@/lib/storage';
+import * as sync from '@/lib/sync';
 import CalendarGrid from '@/components/calendar/CalendarGrid';
 
 export default function ExperimentPage() {
@@ -14,15 +15,24 @@ export default function ExperimentPage() {
   const [experiment, setExperiment] = useState<Experiment | null>(null);
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState('');
+  const [status, setStatus] = useState<string>('idle');
 
   useEffect(() => {
-    const exp = storage.getExperiment(id);
-    if (!exp) {
-      router.push('/');
-      return;
-    }
-    setExperiment(exp);
-    setName(exp.name);
+    let cancelled = false;
+    (async () => {
+      await sync.pullFullSnapshot(id);
+      if (cancelled) return;
+      const exp = storage.getExperiment(id);
+      if (!exp) {
+        router.push('/');
+        return;
+      }
+      setExperiment(exp);
+      setName(exp.name);
+      sync.startPolling(id);
+    })();
+    const off = sync.onStatus(setStatus);
+    return () => { cancelled = true; off(); };
   }, [id, router]);
 
   const handleRename = () => {
@@ -72,7 +82,7 @@ export default function ExperimentPage() {
           </h1>
         )}
       </div>
-      <CalendarGrid experimentId={id} />
+      <CalendarGrid experimentId={id} syncStatus={status} />
     </div>
   );
 }

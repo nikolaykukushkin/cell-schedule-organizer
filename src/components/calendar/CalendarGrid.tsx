@@ -9,23 +9,43 @@ import {
   SUB_EVENT_COLORS,
   PlateType,
   densityUnit,
+  platesLabel,
 } from '@/types';
-import { getMonthGrid, toDateStr, isInRange, rangesOverlap, addDays } from '@/lib/dates';
+import { getMonthGrid, toDateStr, isInRange, rangesOverlap, addDays, shiftDateHour } from '@/lib/dates';
 import * as storage from '@/lib/storage';
+import { onRemoteChange } from '@/lib/sync';
 import CalendarHeader from './CalendarHeader';
 import EventPanel from './EventPanel';
 import NewPopulationDialog from './NewPopulationDialog';
-import PlateVisual from './PlateVisual';
+import MobileWeekView from './MobileWeekView';
 
 const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const LONG_PRESS_MS = 500;
+
+/** Total hours an event spans. Used to pick abbreviated label for small events. */
+function eventDurationHours(ev: SubEvent): number {
+  const [sy, sm, sd] = ev.startDate.split('-').map(Number);
+  const [ey, em, ed] = ev.endDate.split('-').map(Number);
+  const dayDelta = Math.round((new Date(ey, em - 1, ed).getTime() - new Date(sy, sm - 1, sd).getTime()) / 86400000);
+  return dayDelta * 24 + (ev.endHour + 1 - ev.startHour);
+}
+
+function displayEventLabel(ev: SubEvent): string {
+  if (eventDurationHours(ev) < 5) {
+    const first = (ev.label || '?').trim().charAt(0).toUpperCase();
+    return first || '?';
+  }
+  return ev.label;
+}
 
 interface CalendarGridProps {
   experimentId: string;
+  syncStatus?: string;
 }
 
 type DragMode = 'none' | 'create-pop' | 'move-pop' | 'move-event' | 'resize-pop-start' | 'resize-pop-end' | 'resize-event-start' | 'resize-event-end';
 
-export default function CalendarGrid({ experimentId }: CalendarGridProps) {
+export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: CalendarGridProps) {
   const today = new Date();
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -49,18 +69,54 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
   const [selectedPopId, setSelectedPopId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
-  // Mobile detection
+  // Mobile detection + orientation
   const [isMobile, setIsMobile] = useState(false);
+  const [isLandscape, setIsLandscape] = useState(false);
   useEffect(() => {
-    const check = () => setIsMobile(window.innerWidth < 768);
+    const check = () => {
+      setIsMobile(window.innerWidth < 768);
+      setIsLandscape(window.innerWidth > window.innerHeight);
+    };
     check();
     window.addEventListener('resize', check);
-    return () => window.removeEventListener('resize', check);
+    window.addEventListener('orientationchange', check);
+    return () => {
+      window.removeEventListener('resize', check);
+      window.removeEventListener('orientationchange', check);
+    };
   }, []);
 
-  // Long-tap timer for mobile event creation
+  // Refresh from localStorage when the sync poller brings in remote changes
+  useEffect(() => {
+    const off = onRemoteChange(() => {
+      setPopulations(storage.getPopulations(experimentId));
+      setEvents(storage.getAllSubEvents(experimentId));
+      setConnections(storage.getConnections(experimentId));
+    });
+    return off;
+  }, [experimentId]);
+
+  // Global safety-net: release outside the grid should also clear drag state.
+  useEffect(() => {
+    const onUp = () => {
+      if (dragMode.current === 'none') return;
+      dragMode.current = 'none';
+      dragTargetId.current = null;
+      dragAnchorDate.current = null;
+      dragMoved.current = false;
+    };
+    document.addEventListener('mouseup', onUp);
+    return () => document.removeEventListener('mouseup', onUp);
+  }, []);
+
+  // Long-press timer (desktop mouse + mobile touch) for creating events on bars
   const longTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longTapPopId = useRef<string | null>(null);
+
+  const cancelLongPress = useCallback(() => {
+    if (longTapTimer.current) { clearTimeout(longTapTimer.current); longTapTimer.current = null; }
+    longTapPopId.current = null;
+  }, []);
 
   // Drag state
   const dragMode = useRef<DragMode>('none');
@@ -126,7 +182,35 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
     setDragEnd(dateStr);
   }, []);
 
-  // --- Mousedown on population bar: prepare to move (or duplicate with Option) ---
+  // --- Create a 4-hour event inside a population at given date+hour ---
+  const createEventAt = useCallback((popId: string, dateStr: string, startHour: number) => {
+    const pop = populationsRef.current.find(p => p.id === popId);
+    if (!pop) return;
+    let d = dateStr;
+    if (d < pop.startDate) d = pop.startDate;
+    if (d > pop.endDate) d = pop.endDate;
+    let sH = Math.max(0, Math.min(20, startHour));
+    if (sH + 3 > 23) sH = 20;
+    const eH = sH + 3;
+    const ev: SubEvent = {
+      id: crypto.randomUUID(),
+      populationId: popId,
+      label: 'New event',
+      comments: '',
+      allDay: false,
+      startDate: d,
+      startHour: sH,
+      endDate: d,
+      endHour: eH,
+      color: SUB_EVENT_COLORS[eventsRef.current.filter(se => se.populationId === popId).length % SUB_EVENT_COLORS.length],
+    };
+    storage.saveSubEvent(ev);
+    setEvents(prev => [...prev, ev]);
+    setSelectedEventId(ev.id);
+    setSelectedPopId(popId);
+  }, []);
+
+  // --- Mousedown on population bar: prepare to move (or duplicate with Option). Long-press creates event. ---
   const handleBarMouseDown = useCallback((popId: string, e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('[data-event-box]') || (e.target as HTMLElement).closest('[data-resize]')) return;
     e.stopPropagation();
@@ -138,36 +222,18 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
     dragTargetId.current = popId;
     dragAnchorDate.current = dh.date;
     dragAnchorHour.current = dh.hour;
-  }, [getDateHourFromGlobalMouse]);
-
-  // --- Double-click on bar: create event ---
-  const handleBarDoubleClick = useCallback((popId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const dh = getDateHourFromGlobalMouse(e);
-    if (!dh) return;
-    const pop = populations.find(p => p.id === popId);
-    if (!pop) return;
-    // Clamp to population range
-    let evDate = dh.date;
-    if (evDate < pop.startDate) evDate = pop.startDate;
-    if (evDate > pop.endDate) evDate = pop.endDate;
-    const ev: SubEvent = {
-      id: crypto.randomUUID(),
-      populationId: popId,
-      label: 'New event',
-      comments: '',
-      allDay: true,
-      startDate: evDate,
-      startHour: 0,
-      endDate: evDate,
-      endHour: 23,
-      color: SUB_EVENT_COLORS[events.filter(se => se.populationId === popId).length % SUB_EVENT_COLORS.length],
-    };
-    storage.saveSubEvent(ev);
-    setEvents(prev => [...prev, ev]);
-    setSelectedEventId(ev.id);
-    setSelectedPopId(popId);
-  }, [getDateHourFromGlobalMouse, populations, events]);
+    // Long-press timer: fires if no drag movement within LONG_PRESS_MS
+    cancelLongPress();
+    longTapPopId.current = popId;
+    longTapTimer.current = setTimeout(() => {
+      longTapTimer.current = null;
+      if (!dragMoved.current && longTapPopId.current === popId) {
+        dragMode.current = 'none';
+        createEventAt(popId, dh.date, dh.hour);
+      }
+      longTapPopId.current = null;
+    }, LONG_PRESS_MS);
+  }, [getDateHourFromGlobalMouse, cancelLongPress, createEventAt]);
 
   // --- Mousedown on event box: prepare to move (or duplicate with Option) ---
   const handleEventMouseDown = useCallback((eventId: string, e: React.MouseEvent) => {
@@ -199,8 +265,20 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
 
   // --- Global mouse move ---
   const handleGlobalMouseMove = useCallback((e: React.MouseEvent) => {
+    // Safety net: if no mouse button is pressed, clear any stuck drag state.
+    // Fixes the "bar resizes on hover" bug when a mouseup happened outside the container.
+    if (e.buttons === 0 && dragMode.current !== 'none') {
+      dragMode.current = 'none';
+      dragTargetId.current = null;
+      dragAnchorDate.current = null;
+      dragMoved.current = false;
+      cancelLongPress();
+      return;
+    }
     if (dragMode.current === 'none') return;
     dragMoved.current = true;
+    // Movement cancels any pending long-press (so it becomes a drag, not a create)
+    cancelLongPress();
     const dh = getDateHourFromGlobalMouse(e);
     if (!dh) return;
 
@@ -267,21 +345,41 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
         }
       }
 
-      const dayDelta = daysBetween(dragAnchorDate.current, dh.date);
-      if (dayDelta !== 0) {
-        dragAnchorDate.current = dh.date;
-        const evId = dragTargetId.current;
-        setEvents(prev => prev.map(ev => {
-          if (ev.id !== evId) return ev;
-          const newStart = addDays(ev.startDate, dayDelta);
-          const newEnd = addDays(ev.endDate, dayDelta);
-          const pop = populationsRef.current.find(p => p.id === ev.populationId);
-          if (!pop) return ev;
-          if (newStart < pop.startDate || newEnd > pop.endDate) return ev;
-          const updated = { ...ev, startDate: newStart, endDate: newEnd };
-          storage.saveSubEvent(updated);
-          return updated;
-        }));
+      const evId = dragTargetId.current;
+      const ev = eventsRef.current.find(x => x.id === evId);
+      const pop = ev ? populationsRef.current.find(p => p.id === ev.populationId) : undefined;
+      if (ev && pop) {
+        if (ev.allDay) {
+          const dayDelta = daysBetween(dragAnchorDate.current, dh.date);
+          if (dayDelta !== 0) {
+            dragAnchorDate.current = dh.date;
+            setEvents(prev => prev.map(x => {
+              if (x.id !== evId) return x;
+              const newStart = addDays(x.startDate, dayDelta);
+              const newEnd = addDays(x.endDate, dayDelta);
+              if (newStart < pop.startDate || newEnd > pop.endDate) return x;
+              const updated = { ...x, startDate: newStart, endDate: newEnd };
+              storage.saveSubEvent(updated);
+              return updated;
+            }));
+          }
+        } else {
+          // Sub-day event: shift by hour delta
+          const hourDelta = daysBetween(dragAnchorDate.current, dh.date) * 24 + (dh.hour - dragAnchorHour.current);
+          if (hourDelta !== 0) {
+            dragAnchorDate.current = dh.date;
+            dragAnchorHour.current = dh.hour;
+            setEvents(prev => prev.map(x => {
+              if (x.id !== evId) return x;
+              const s = shiftDateHour(x.startDate, x.startHour, hourDelta);
+              const e2 = shiftDateHour(x.endDate, x.endHour, hourDelta);
+              if (s.date < pop.startDate || e2.date > pop.endDate) return x;
+              const updated = { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
+              storage.saveSubEvent(updated);
+              return updated;
+            }));
+          }
+        }
       }
     }
 
@@ -320,7 +418,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
         return ev;
       }));
     }
-  }, [getDateHourFromGlobalMouse, populations]);
+  }, [getDateHourFromGlobalMouse, populations, cancelLongPress]);
 
   // --- Mouse up ---
   const handleMouseUp = useCallback(() => {
@@ -330,6 +428,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
     dragTargetId.current = null;
     dragAnchorDate.current = null;
     dragMoved.current = false;
+    cancelLongPress();
 
     if (mode === 'create-pop' && dragStart && dragEnd && moved) {
       const s = dragStart < dragEnd ? dragStart : dragEnd;
@@ -348,7 +447,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
     if (mode === 'move-pop' && !moved && dragTargetId.current) {
       // Was actually stored before reset — use eventDragPopId pattern
     }
-  }, [dragStart, dragEnd]);
+  }, [dragStart, dragEnd, cancelLongPress]);
 
   // For click-without-move on bar: select population (handled separately since dragTargetId is cleared)
   const handleBarClick = useCallback((popId: string, e: React.MouseEvent) => {
@@ -393,7 +492,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
   }, [selectedEventId, selectedPopId]);
 
   const handleCreatePopulation = useCallback(
-    (data: { name: string; cellLine: string; passage: string; plateType: PlateType; plateCount: number; cellDensity: string; experimenter: string }) => {
+    (data: { name: string; cellLine: string; passage: string; plateType: PlateType; plateCount: number; cellDensity: string; experimenter: string; experimentLabel: string; comments: string }) => {
       if (!dragStart || !dragEnd) return;
       const s = dragStart < dragEnd ? dragStart : dragEnd;
       const e = dragStart < dragEnd ? dragEnd : dragStart;
@@ -405,7 +504,8 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
         color: POPULATION_COLORS[populations.length % POPULATION_COLORS.length],
         plateType: data.plateType, plateCount: data.plateCount, cellDensity: data.cellDensity,
         experimenter: data.experimenter,
-        comments: '',
+        experimentLabel: data.experimentLabel,
+        comments: data.comments,
         allDay: true,
         startDate: s, startHour: 0, endDate: e, endHour: 23,
       };
@@ -535,17 +635,34 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
         }
       }
       if (dragMode.current === 'move-event' && dragTargetId.current && dragAnchorDate.current) {
-        const dd = daysBetween(dragAnchorDate.current, dh.date);
-        if (dd !== 0) {
-          dragAnchorDate.current = dh.date;
-          const eid = dragTargetId.current;
-          setEvents(prev => prev.map(ev => {
-            if (ev.id !== eid) return ev;
-            const ns = addDays(ev.startDate, dd); const ne = addDays(ev.endDate, dd);
-            const pop = populationsRef.current.find(p => p.id === ev.populationId);
-            if (!pop || ns < pop.startDate || ne > pop.endDate) return ev;
-            const u = { ...ev, startDate: ns, endDate: ne }; storage.saveSubEvent(u); return u;
-          }));
+        const eid = dragTargetId.current;
+        const ev = eventsRef.current.find(x => x.id === eid);
+        const pop = ev ? populationsRef.current.find(p => p.id === ev.populationId) : undefined;
+        if (!ev || !pop) return;
+        if (ev.allDay) {
+          const dd = daysBetween(dragAnchorDate.current, dh.date);
+          if (dd !== 0) {
+            dragAnchorDate.current = dh.date;
+            setEvents(prev => prev.map(x => {
+              if (x.id !== eid) return x;
+              const ns = addDays(x.startDate, dd); const ne = addDays(x.endDate, dd);
+              if (ns < pop.startDate || ne > pop.endDate) return x;
+              const u = { ...x, startDate: ns, endDate: ne }; storage.saveSubEvent(u); return u;
+            }));
+          }
+        } else {
+          const hourDelta = daysBetween(dragAnchorDate.current, dh.date) * 24 + (dh.hour - dragAnchorHour.current);
+          if (hourDelta !== 0) {
+            dragAnchorDate.current = dh.date;
+            dragAnchorHour.current = dh.hour;
+            setEvents(prev => prev.map(x => {
+              if (x.id !== eid) return x;
+              const s = shiftDateHour(x.startDate, x.startHour, hourDelta);
+              const e2 = shiftDateHour(x.endDate, x.endHour, hourDelta);
+              if (s.date < pop.startDate || e2.date > pop.endDate) return x;
+              const u = { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour }; storage.saveSubEvent(u); return u;
+            }));
+          }
         }
       }
     };
@@ -564,6 +681,10 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
   const todayStr = toDateStr(today);
   const BAR_HEIGHT = 56;
 
+  if (isMobile) {
+    return <MobileWeekView experimentId={experimentId} orientation={isLandscape ? 'landscape' : 'portrait'} syncStatus={syncStatus} />;
+  }
+
   return (
     <div
       ref={containerRef}
@@ -573,6 +694,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
     >
       <div className="border-b border-slate-200/80 bg-white flex items-center flex-shrink-0">
         <CalendarHeader year={year} month={month} onPrev={goPrev} onNext={goNext} onToday={goToday} />
+        <SyncBadge status={syncStatus} />
       </div>
 
       <div className={`flex-1 overflow-hidden ${isMobile ? 'flex flex-col' : 'relative'}`}>
@@ -676,33 +798,29 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
                           // Set up move drag
                           dragMode.current = 'move-pop'; dragMoved.current = false; dragDuplicated.current = false;
                           dragTargetId.current = bar.pop.id; dragAnchorDate.current = dh.date; dragAnchorHour.current = dh.hour;
-                          // Long-tap: create event if held 500ms without moving
+                          // Long-press: create 4h event if held LONG_PRESS_MS without moving
                           longTapPopId.current = bar.pop.id;
                           if (longTapTimer.current) clearTimeout(longTapTimer.current);
                           longTapTimer.current = setTimeout(() => {
+                            longTapTimer.current = null;
                             if (!dragMoved.current && longTapPopId.current) {
-                              dragMode.current = 'none'; // cancel move
-                              handleBarDoubleClick(longTapPopId.current, { stopPropagation: () => {}, clientX: t.clientX, clientY: t.clientY } as unknown as React.MouseEvent);
+                              dragMode.current = 'none';
+                              createEventAt(longTapPopId.current, dh.date, dh.hour);
                               longTapPopId.current = null;
                             }
-                          }, 500);
+                          }, LONG_PRESS_MS);
                         }}
                         onClick={(e) => handleBarClick(bar.pop.id, e)}
-                        onDoubleClick={(e) => handleBarDoubleClick(bar.pop.id, e)}
                       >
                         {isBarStart && (
-                          <div className="flex items-center gap-2.5 max-md:gap-1 px-3 max-md:px-1.5 h-full pointer-events-none overflow-hidden">
-                            <span className="text-[15px] max-md:text-[11px] font-bold truncate" style={{ color: bar.pop.color }}>
+                          <div className="flex flex-col justify-center px-3 max-md:px-1.5 h-full pointer-events-none overflow-hidden">
+                            <span className="text-[14px] max-md:text-[11px] font-bold truncate leading-tight" style={{ color: bar.pop.color }}>
+                              {platesLabel(bar.pop.plateType, bar.pop.plateCount)}
+                            </span>
+                            <span className="text-[12px] max-md:text-[10px] font-semibold truncate leading-tight opacity-80" style={{ color: bar.pop.color }}>
                               {bar.pop.name}
+                              {bar.pop.cellDensity && <span className="opacity-70 font-medium"> · {bar.pop.cellDensity} {densityUnit(bar.pop.plateType)}</span>}
                             </span>
-                            <span className="flex-shrink-0 max-md:hidden">
-                              <PlateVisual plateType={bar.pop.plateType} count={bar.pop.plateCount} size={30} />
-                            </span>
-                            {bar.pop.cellDensity && (
-                              <span className="text-[13px] max-md:text-[10px] font-semibold whitespace-nowrap opacity-70 max-md:hidden" style={{ color: bar.pop.color }}>
-                                {bar.pop.cellDensity} {densityUnit(bar.pop.plateType)}
-                              </span>
-                            )}
                           </div>
                         )}
 
@@ -746,7 +864,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
                               onClick={(e) => handleEventClick(ev.id, ev.populationId, e)}
                               onMouseDown={(e) => handleEventMouseDown(ev.id, e)}
                             >
-                              <span className="text-[13px] font-bold text-white truncate px-2 drop-shadow-sm pointer-events-none">{ev.label}</span>
+                              <span className="text-[13px] font-bold text-white truncate px-2 drop-shadow-sm pointer-events-none">{displayEventLabel(ev)}</span>
                               <div data-resize className="absolute left-0 top-0 bottom-0 w-3 cursor-col-resize hover:bg-white/30 rounded-l-lg"
                                 onMouseDown={(e) => handleResizeEventStart(ev.id, e)} />
                               <div data-resize className="absolute right-0 top-0 bottom-0 w-3 cursor-col-resize hover:bg-white/30 rounded-r-lg"
@@ -809,4 +927,16 @@ function daysBetween(a: string, b: string): number {
   const [ay, am, ad] = a.split('-').map(Number);
   const [by, bm, bd] = b.split('-').map(Number);
   return Math.round((new Date(by, bm - 1, bd).getTime() - new Date(ay, am - 1, ad).getTime()) / 86400000);
+}
+
+export function SyncBadge({ status }: { status: string }) {
+  const cfg = {
+    idle: { label: 'Synced', color: 'text-emerald-600 bg-emerald-50' },
+    syncing: { label: 'Syncing…', color: 'text-indigo-600 bg-indigo-50' },
+    error: { label: 'Sync error', color: 'text-amber-600 bg-amber-50' },
+    offline: { label: 'Offline', color: 'text-slate-500 bg-slate-100' },
+  }[status as 'idle' | 'syncing' | 'error' | 'offline'] ?? { label: status, color: 'text-slate-500 bg-slate-100' };
+  return (
+    <span className={`ml-auto mr-4 text-[11px] font-semibold px-2 py-0.5 rounded-full ${cfg.color}`}>{cfg.label}</span>
+  );
 }

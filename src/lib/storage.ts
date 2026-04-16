@@ -1,4 +1,5 @@
 import { ExperimentGroup, CellPopulation, SubEvent, Connection, PRESET_CELL_LINES } from '@/types';
+import { enqueue } from './sync';
 
 // Re-export for backwards compat
 type Experiment = ExperimentGroup;
@@ -33,6 +34,7 @@ export function saveExperiment(experiment: Experiment): void {
   if (idx >= 0) all[idx] = experiment;
   else all.push(experiment);
   setItems(EXPERIMENTS_KEY, all);
+  enqueue({ table: 'experiment_groups', op: 'upsert', row: experiment as unknown as Record<string, unknown> });
 }
 
 export function deleteExperiment(id: string): void {
@@ -40,6 +42,7 @@ export function deleteExperiment(id: string): void {
   const pops = getPopulations(id);
   pops.forEach(p => deletePopulation(p.id));
   setItems(CONNECTIONS_KEY, getItems<Connection>(CONNECTIONS_KEY).filter(c => c.experimentId !== id));
+  enqueue({ table: 'experiment_groups', op: 'delete', row: { id } });
 }
 
 // Populations
@@ -53,11 +56,15 @@ export function savePopulation(population: CellPopulation): void {
   if (idx >= 0) all[idx] = population;
   else all.push(population);
   setItems(POPULATIONS_KEY, all);
+  enqueue({ table: 'cell_populations', op: 'upsert', row: population as unknown as Record<string, unknown> });
 }
 
 export function deletePopulation(id: string): void {
   setItems(POPULATIONS_KEY, getItems<CellPopulation>(POPULATIONS_KEY).filter(p => p.id !== id));
+  const childEvents = getItems<SubEvent>(SUBEVENTS_KEY).filter(e => e.populationId === id);
   setItems(SUBEVENTS_KEY, getItems<SubEvent>(SUBEVENTS_KEY).filter(e => e.populationId !== id));
+  enqueue({ table: 'cell_populations', op: 'delete', row: { id } });
+  childEvents.forEach(ev => enqueue({ table: 'sub_events', op: 'delete', row: { id: ev.id } }));
 }
 
 // SubEvents
@@ -76,10 +83,12 @@ export function saveSubEvent(event: SubEvent): void {
   if (idx >= 0) all[idx] = event;
   else all.push(event);
   setItems(SUBEVENTS_KEY, all);
+  enqueue({ table: 'sub_events', op: 'upsert', row: event as unknown as Record<string, unknown> });
 }
 
 export function deleteSubEvent(id: string): void {
   setItems(SUBEVENTS_KEY, getItems<SubEvent>(SUBEVENTS_KEY).filter(e => e.id !== id));
+  enqueue({ table: 'sub_events', op: 'delete', row: { id } });
 }
 
 // Connections
@@ -93,10 +102,12 @@ export function saveConnection(connection: Connection): void {
   if (idx >= 0) all[idx] = connection;
   else all.push(connection);
   setItems(CONNECTIONS_KEY, all);
+  enqueue({ table: 'connections', op: 'upsert', row: connection as unknown as Record<string, unknown> });
 }
 
 export function deleteConnection(id: string): void {
   setItems(CONNECTIONS_KEY, getItems<Connection>(CONNECTIONS_KEY).filter(c => c.id !== id));
+  enqueue({ table: 'connections', op: 'delete', row: { id } });
 }
 
 // Export/Import

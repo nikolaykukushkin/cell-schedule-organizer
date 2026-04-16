@@ -36,10 +36,12 @@ export interface CellPopulation {
   experimenter: string;
   comments: string;
   allDay: boolean;
-  startDate: string; // YYYY-MM-DD
+  startDate: string; // YYYY-MM-DD — seed date
   startHour: number; // 0-23
-  endDate: string;   // YYYY-MM-DD
+  endDate: string;   // YYYY-MM-DD — harvest date
   endHour: number;   // 0-23
+  /** Free-text ID the user assigns to this experiment (e.g. "Exp 042"). Separate from its seed/harvest dates. */
+  experimentLabel?: string;
 }
 
 /** An event box within an experiment bar. */
@@ -83,6 +85,14 @@ export function densityUnit(plateType: PlateType): string {
   if (plateType.endsWith('well')) return 'M/well';
   if (plateType.startsWith('T')) return 'M/flask';
   return 'M/dish';
+}
+
+/** Human-readable "4× 24-well plates" style label. */
+export function platesLabel(plateType: PlateType, count: number): string {
+  const base = PLATE_LABELS[plateType];
+  if (count === 1) return `1× ${base}`;
+  const plural = base.endsWith('Dish') ? base.replace('Dish', 'Dishes') : base + 's';
+  return `${count}× ${plural}`;
 }
 
 export const POPULATION_COLORS = [

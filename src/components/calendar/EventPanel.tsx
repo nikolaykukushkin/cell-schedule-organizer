@@ -170,6 +170,7 @@ export default function EventPanel({
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-2">
             <div className="col-span-2"><Label>Experiment Name</Label><AutocompleteInput value={population.name} onChange={v => onUpdatePopulation({ ...population, name: v })} suggestions={storage.getAllExperimentNames()} placeholder="e.g. CRE-luc timecourse" /></div>
+            <div className="col-span-2"><Label>Experiment ID</Label><Input type="text" value={population.experimentLabel || ''} onChange={e => onUpdatePopulation({ ...population, experimentLabel: (e.target as HTMLInputElement).value })} placeholder="e.g. Exp 042" /></div>
             <div>
               <Label>Cell Line</Label>
               <AutocompleteInput value={population.cellLine} onChange={v => onUpdatePopulation({ ...population, cellLine: v })} suggestions={storage.getAllCellLines()} placeholder="e.g. HEK-293T" />
@@ -190,11 +191,11 @@ export default function EventPanel({
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <Label>Start</Label>
+              <Label>Seed Date</Label>
               <input type="date" autoComplete="off" value={population.startDate} onChange={e => onUpdatePopulation({ ...population, startDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
             </div>
             <div>
-              <Label>End</Label>
+              <Label>Harvest Date</Label>
               <input type="date" autoComplete="off" value={population.endDate} onChange={e => onUpdatePopulation({ ...population, endDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
             </div>
           </div>

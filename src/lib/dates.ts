@@ -54,3 +54,12 @@ export function isInRange(dateStr: string, start: string, end: string): boolean 
 export function rangesOverlap(s1: string, e1: string, s2: string, e2: string): boolean {
   return s1 <= e2 && s2 <= e1;
 }
+
+/** Shift a (date, hour) pair by deltaHours, rolling across day boundaries. */
+export function shiftDateHour(date: string, hour: number, deltaHours: number): { date: string; hour: number } {
+  let total = hour + deltaHours;
+  let dayShift = 0;
+  while (total >= 24) { total -= 24; dayShift++; }
+  while (total < 0) { total += 24; dayShift--; }
+  return { date: addDays(date, dayShift), hour: total };
+}
