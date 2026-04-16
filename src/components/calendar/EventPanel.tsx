@@ -1,5 +1,6 @@
 'use client';
 
+import { useCallback, useRef, useState } from 'react';
 import { SubEvent, CellPopulation, PlateType, PLATE_LABELS, densityUnit } from '@/types';
 import PlateVisual from './PlateVisual';
 
@@ -53,18 +54,62 @@ export default function EventPanel({
   onRepeatNextWeek,
   onClose,
 }: EventPanelProps) {
+  // Draggable panel position (desktop only)
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('input, select, button, textarea, [data-no-drag]')) return;
+    e.preventDefault();
+    const panel = panelRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const currentX = pos?.x ?? rect.left;
+    const currentY = pos?.y ?? rect.top;
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: currentX, origY: currentY };
+
+    const onMove = (me: MouseEvent) => {
+      if (!dragRef.current) return;
+      const dx = me.clientX - dragRef.current.startX;
+      const dy = me.clientY - dragRef.current.startY;
+      setPos({ x: dragRef.current.origX + dx, y: dragRef.current.origY + dy });
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [pos]);
+
   if (!subEvent && !population) return null;
+
+  const desktopStyle = pos
+    ? { left: pos.x, top: pos.y, right: 'auto', bottom: 'auto' } as React.CSSProperties
+    : {};
 
   return (
     <>
     {/* Mobile backdrop */}
     <div className="hidden max-md:block fixed inset-0 bg-black/20 z-30" onClick={onClose} />
-    <div className="
-      fixed right-4 top-16 bottom-4 w-[340px] bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-200/60
-      p-6 overflow-y-auto z-40
-      max-md:inset-x-0 max-md:top-auto max-md:bottom-0 max-md:w-auto max-md:max-h-[55vh] max-md:rounded-b-none max-md:rounded-t-2xl max-md:right-0 max-md:border-0 max-md:shadow-[0_-8px_30px_rgba(0,0,0,0.12)]
-    ">
-      <div className="flex justify-between items-center mb-6">
+    <div
+      ref={panelRef}
+      className="
+        fixed right-4 top-16 w-[340px] bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-200/60
+        p-6 overflow-y-auto z-40 max-h-[calc(100vh-5rem)]
+        max-md:inset-x-0 max-md:top-auto max-md:bottom-0 max-md:w-auto max-md:max-h-[55vh] max-md:rounded-b-none max-md:rounded-t-2xl max-md:right-0 max-md:border-0 max-md:shadow-[0_-8px_30px_rgba(0,0,0,0.12)]
+      "
+      style={desktopStyle}
+      onMouseDown={handleDragStart}
+    >
+      {/* Drag handle indicator */}
+      <div className="hidden md:block absolute top-2 left-1/2 -translate-x-1/2 w-8 h-1 rounded-full bg-slate-200 cursor-grab active:cursor-grabbing" />
+      {/* Mobile drag handle */}
+      <div className="md:hidden absolute top-2 left-1/2 -translate-x-1/2 w-10 h-1 rounded-full bg-slate-300" />
+
+      <div className="flex justify-between items-center mb-6 mt-2">
         <h3 className="text-lg font-bold text-slate-800 tracking-tight">
           {subEvent ? 'Event' : 'Population'}
         </h3>
@@ -145,6 +190,16 @@ export default function EventPanel({
           </div>
 
           <div>
+            <Label>Experimenter</Label>
+            <Input
+              type="text"
+              value={population.experimenter}
+              onChange={e => onUpdatePopulation({ ...population, experimenter: (e.target as HTMLInputElement).value })}
+              placeholder="e.g. Nikolay"
+            />
+          </div>
+
+          <div>
             <Label>Plate Type</Label>
             <select
               value={population.plateType}
@@ -167,7 +222,7 @@ export default function EventPanel({
             />
           </div>
 
-          <div className="py-1 flex items-center justify-center bg-slate-50 rounded-lg p-3">
+          <div className="flex items-center justify-center bg-slate-50 rounded-lg p-3">
             <PlateVisual plateType={population.plateType} count={population.plateCount} size={38} />
           </div>
 

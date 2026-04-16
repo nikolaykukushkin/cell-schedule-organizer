@@ -16,6 +16,7 @@ import CalendarHeader from './CalendarHeader';
 import EventPanel from './EventPanel';
 import NewPopulationDialog from './NewPopulationDialog';
 import PlateVisual from './PlateVisual';
+import { scheduleSync } from '@/lib/github-sync';
 
 const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -48,6 +49,11 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
 
   const [selectedPopId, setSelectedPopId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+
+  // Schedule GitHub sync on data changes
+  useEffect(() => {
+    scheduleSync(populations, events);
+  }, [populations, events]);
 
   // Drag state
   const dragMode = useRef<DragMode>('none');
@@ -378,7 +384,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
   }, [selectedEventId, selectedPopId]);
 
   const handleCreatePopulation = useCallback(
-    (data: { name: string; plateType: PlateType; plateCount: number; cellDensity: string }) => {
+    (data: { name: string; plateType: PlateType; plateCount: number; cellDensity: string; experimenter: string }) => {
       if (!dragStart || !dragEnd) return;
       const s = dragStart < dragEnd ? dragStart : dragEnd;
       const e = dragStart < dragEnd ? dragEnd : dragStart;
@@ -387,12 +393,14 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
         name: data.name,
         color: POPULATION_COLORS[populations.length % POPULATION_COLORS.length],
         plateType: data.plateType, plateCount: data.plateCount, cellDensity: data.cellDensity,
+        experimenter: data.experimenter,
         startDate: s, startHour: 0, endDate: e, endHour: 23,
       };
       storage.savePopulation(pop);
       setPopulations(prev => [...prev, pop]);
       setDragStart(null); setDragEnd(null); setShowNewDialog(false);
-      setSelectedPopId(pop.id); setSelectedEventId(null);
+      // Don't auto-open panel — just deselect
+      setSelectedPopId(null); setSelectedEventId(null);
     },
     [dragStart, dragEnd, experimentId, populations.length]
   );

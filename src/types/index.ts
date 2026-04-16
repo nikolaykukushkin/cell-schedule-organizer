@@ -30,6 +30,7 @@ export interface CellPopulation {
   plateCount: number;
   /** Density in millions per well/dish, e.g. "0.5" means 0.5M per well */
   cellDensity: string;
+  experimenter: string;
   startDate: string; // YYYY-MM-DD
   startHour: number; // 0-23
   endDate: string;   // YYYY-MM-DD
