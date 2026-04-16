@@ -16,7 +16,6 @@ import CalendarHeader from './CalendarHeader';
 import EventPanel from './EventPanel';
 import NewPopulationDialog from './NewPopulationDialog';
 import PlateVisual from './PlateVisual';
-import { scheduleSync } from '@/lib/github-sync';
 
 const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -50,10 +49,18 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
   const [selectedPopId, setSelectedPopId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
-  // Schedule GitHub sync on data changes
+  // Mobile detection
+  const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
-    scheduleSync(populations, events);
-  }, [populations, events]);
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
+  // Long-tap timer for mobile event creation
+  const longTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longTapPopId = useRef<string | null>(null);
 
   // Drag state
   const dragMode = useRef<DragMode>('none');
@@ -148,6 +155,8 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
       id: crypto.randomUUID(),
       populationId: popId,
       label: 'New event',
+      comments: '',
+      allDay: true,
       startDate: evDate,
       startHour: 0,
       endDate: evDate,
@@ -384,16 +393,20 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
   }, [selectedEventId, selectedPopId]);
 
   const handleCreatePopulation = useCallback(
-    (data: { name: string; plateType: PlateType; plateCount: number; cellDensity: string; experimenter: string }) => {
+    (data: { name: string; cellLine: string; passage: string; plateType: PlateType; plateCount: number; cellDensity: string; experimenter: string }) => {
       if (!dragStart || !dragEnd) return;
       const s = dragStart < dragEnd ? dragStart : dragEnd;
       const e = dragStart < dragEnd ? dragEnd : dragStart;
       const pop: CellPopulation = {
         id: crypto.randomUUID(), experimentId,
         name: data.name,
+        cellLine: data.cellLine,
+        passage: data.passage,
         color: POPULATION_COLORS[populations.length % POPULATION_COLORS.length],
         plateType: data.plateType, plateCount: data.plateCount, cellDensity: data.cellDensity,
         experimenter: data.experimenter,
+        comments: '',
+        allDay: true,
         startDate: s, startHour: 0, endDate: e, endHour: 23,
       };
       storage.savePopulation(pop);
@@ -502,6 +515,8 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
     if (!el) return;
     const makeSynth = (t: Touch) => ({ clientX: t.clientX, clientY: t.clientY } as MouseEvent);
     const onTouchMove = (e: TouchEvent) => {
+      if (longTapTimer.current) { clearTimeout(longTapTimer.current); longTapTimer.current = null; }
+      longTapPopId.current = null;
       if (dragMode.current === 'none') return;
       e.preventDefault();
       dragMoved.current = true;
@@ -534,7 +549,11 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
         }
       }
     };
-    const onTouchEnd = () => { handleMouseUp(); };
+    const onTouchEnd = () => {
+      if (longTapTimer.current) { clearTimeout(longTapTimer.current); longTapTimer.current = null; }
+      longTapPopId.current = null;
+      handleMouseUp();
+    };
     el.addEventListener('touchmove', onTouchMove, { passive: false });
     el.addEventListener('touchend', onTouchEnd);
     return () => { el.removeEventListener('touchmove', onTouchMove); el.removeEventListener('touchend', onTouchEnd); };
@@ -556,8 +575,8 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
         <CalendarHeader year={year} month={month} onPrev={goPrev} onNext={goNext} onToday={goToday} />
       </div>
 
-      <div className="flex-1 overflow-hidden relative">
-        <div className="h-full flex flex-col overflow-auto select-none bg-slate-50/50">
+      <div className={`flex-1 overflow-hidden ${isMobile ? 'flex flex-col' : 'relative'}`}>
+        <div className={`${isMobile ? 'flex-1 min-h-0' : 'h-full'} flex flex-col overflow-auto select-none bg-slate-50/50`}>
           <div className="grid grid-cols-7 border-b border-slate-200 flex-shrink-0 bg-white">
             {DAY_NAMES.map(d => (
               <div key={d} className="text-center text-[13px] max-md:text-[11px] font-bold text-slate-400 uppercase tracking-widest py-3 max-md:py-2">{d}</div>
@@ -574,7 +593,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
                   ref={el => { weekRowRefs.current[wi] = el; }}
                   data-week-row
                   className="relative flex-1 border-b border-slate-100 last:border-b-0"
-                  style={{ minHeight: Math.max(110, 36 + barAreaHeight) }}
+                  style={{ minHeight: isMobile ? Math.max(60, 24 + barAreaHeight) : Math.max(110, 36 + barAreaHeight) }}
                 >
                   <div className="grid grid-cols-7 absolute inset-0">
                     {week.map((date) => {
@@ -654,8 +673,19 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
                           const t = e.touches[0];
                           const dh = getDateHourFromGlobalMouse({ clientX: t.clientX, clientY: t.clientY } as MouseEvent);
                           if (!dh) return;
+                          // Set up move drag
                           dragMode.current = 'move-pop'; dragMoved.current = false; dragDuplicated.current = false;
                           dragTargetId.current = bar.pop.id; dragAnchorDate.current = dh.date; dragAnchorHour.current = dh.hour;
+                          // Long-tap: create event if held 500ms without moving
+                          longTapPopId.current = bar.pop.id;
+                          if (longTapTimer.current) clearTimeout(longTapTimer.current);
+                          longTapTimer.current = setTimeout(() => {
+                            if (!dragMoved.current && longTapPopId.current) {
+                              dragMode.current = 'none'; // cancel move
+                              handleBarDoubleClick(longTapPopId.current, { stopPropagation: () => {}, clientX: t.clientX, clientY: t.clientY } as unknown as React.MouseEvent);
+                              longTapPopId.current = null;
+                            }
+                          }, 500);
                         }}
                         onClick={(e) => handleBarClick(bar.pop.id, e)}
                         onDoubleClick={(e) => handleBarDoubleClick(bar.pop.id, e)}
@@ -733,17 +763,19 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
           </div>
         </div>
 
-        {/* Floating panel overlay */}
+        {/* Panel: floating on desktop, inline below calendar on mobile */}
         {(selectedEvent || (selectedPop && !selectedEvent)) && (
           <EventPanel
             subEvent={selectedEvent}
             population={selectedPop}
+            allEvents={events}
             onUpdateSubEvent={handleUpdateEvent}
             onDeleteSubEvent={handleDeleteEvent}
             onUpdatePopulation={handleUpdatePopulation}
             onDeletePopulation={handleDeletePopulation}
             onRepeatNextWeek={handleRepeatNextWeek}
             onClose={() => { setSelectedEventId(null); if (!selectedEvent) setSelectedPopId(null); }}
+            isMobile={isMobile}
           />
         )}
       </div>
@@ -766,7 +798,7 @@ export default function CalendarGrid({ experimentId }: CalendarGridProps) {
       {populations.length === 0 && (
         <div className="absolute bottom-10 left-1/2 -translate-x-1/2 text-slate-400 text-base pointer-events-none flex flex-col items-center gap-2">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-slate-300"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-          <span>Click and drag across days to create a population</span>
+          <span>Click and drag across days to create an experiment</span>
         </div>
       )}
     </div>

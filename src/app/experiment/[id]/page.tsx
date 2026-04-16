@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Experiment } from '@/types';
+import { ExperimentGroup as Experiment } from '@/types';
 import * as storage from '@/lib/storage';
 import CalendarGrid from '@/components/calendar/CalendarGrid';
 

@@ -1,4 +1,7 @@
-import { Experiment, CellPopulation, SubEvent, Connection } from '@/types';
+import { ExperimentGroup, CellPopulation, SubEvent, Connection, PRESET_CELL_LINES } from '@/types';
+
+// Re-export for backwards compat
+type Experiment = ExperimentGroup;
 
 const EXPERIMENTS_KEY = 'cell-scheduler:experiments';
 const POPULATIONS_KEY = 'cell-scheduler:populations';
@@ -113,4 +116,17 @@ export function importExperiment(json: string): Experiment {
   data.subEvents.forEach((e: SubEvent) => saveSubEvent(e));
   data.connections.forEach((c: Connection) => saveConnection(c));
   return data.experiment;
+}
+
+// Autocomplete suggestions from past data
+export function getAllCellLines(): string[] {
+  const all = getItems<CellPopulation>(POPULATIONS_KEY);
+  const fromData = all.map(p => p.cellLine).filter(Boolean);
+  return [...new Set([...PRESET_CELL_LINES, ...fromData])];
+}
+
+export function getAllExperimentNames(): string[] {
+  const all = getItems<CellPopulation>(POPULATIONS_KEY);
+  const names = all.map(p => p.name).filter(Boolean);
+  return [...new Set(names)];
 }

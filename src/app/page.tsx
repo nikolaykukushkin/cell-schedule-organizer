@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Experiment } from '@/types';
+import { ExperimentGroup } from '@/types';
 import * as storage from '@/lib/storage';
 import CalendarGrid from '@/components/calendar/CalendarGrid';
 

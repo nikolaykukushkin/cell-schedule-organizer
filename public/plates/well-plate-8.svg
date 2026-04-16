@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect x="7" y="50" width="50" height="6" rx="3" fill="#00000008"/>
+  <rect x="4" y="12" width="56" height="40" rx="4" fill="#e8edf2" stroke="#a0aab4" stroke-width="1"/>
+  <rect x="4" y="12" width="56" height="4" rx="2" fill="#d0d8e0"/>
+  <!-- 2 rows x 4 cols (chamber slide format) -->
+  <g fill="#fff" stroke="#b0b8c0" stroke-width="0.6">
+    <rect x="9" y="21" width="10" height="10" rx="1.5"/><rect x="22" y="21" width="10" height="10" rx="1.5"/>
+    <rect x="35" y="21" width="10" height="10" rx="1.5"/><rect x="48" y="21" width="10" height="10" rx="1.5"/>
+    <rect x="9" y="35" width="10" height="10" rx="1.5"/><rect x="22" y="35" width="10" height="10" rx="1.5"/>
+    <rect x="35" y="35" width="10" height="10" rx="1.5"/><rect x="48" y="35" width="10" height="10" rx="1.5"/>
+  </g>
+  <g fill="#f8c4c4" opacity="0.4">
+    <rect x="11" y="23" width="6" height="6" rx="1"/><rect x="24" y="23" width="6" height="6" rx="1"/>
+    <rect x="37" y="23" width="6" height="6" rx="1"/><rect x="50" y="23" width="6" height="6" rx="1"/>
+    <rect x="11" y="37" width="6" height="6" rx="1"/><rect x="24" y="37" width="6" height="6" rx="1"/>
+    <rect x="37" y="37" width="6" height="6" rx="1"/><rect x="50" y="37" width="6" height="6" rx="1"/>
+  </g>
+</svg>

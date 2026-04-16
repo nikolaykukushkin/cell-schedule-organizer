@@ -9,8 +9,18 @@ interface PlateVisualProps {
   size?: number;
 }
 
+const WELL_PLATE_SVGS: Record<string, string> = {
+  '6': '/plates/well-plate-6.svg',
+  '8': '/plates/well-plate-8.svg',
+  '12': '/plates/well-plate-12.svg',
+  '24': '/plates/well-plate-24.svg',
+};
+
 function getImageSrc(plateType: PlateType): string {
-  if (plateType.endsWith('well')) return '/plates/well-plate.svg';
+  if (plateType.endsWith('well')) {
+    const n = plateType.replace('-well', '');
+    return WELL_PLATE_SVGS[n] || '/plates/well-plate.svg';
+  }
   if (plateType.startsWith('T')) return '/plates/flask.svg';
   return '/plates/petri-dish.svg';
 }

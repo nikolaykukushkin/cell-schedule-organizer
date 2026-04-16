@@ -12,7 +12,8 @@ export type PlateType =
   | 'T75'
   | 'T175';
 
-export interface Experiment {
+/** Top-level container (used internally for storage grouping) */
+export interface ExperimentGroup {
   id: string;
   name: string;
   description: string;
@@ -20,32 +21,38 @@ export interface Experiment {
   updatedAt: string;
 }
 
-/** A cell population timeline bar on the calendar. */
+/** A timeline bar on the calendar — represents one experiment. */
 export interface CellPopulation {
   id: string;
   experimentId: string;
-  name: string;
+  name: string; // experiment name
+  cellLine: string;
+  passage: string; // passage number as string (can be empty)
   color: string;
   plateType: PlateType;
   plateCount: number;
-  /** Density in millions per well/dish, e.g. "0.5" means 0.5M per well */
+  /** Density in millions per well/dish */
   cellDensity: string;
   experimenter: string;
+  comments: string;
+  allDay: boolean;
   startDate: string; // YYYY-MM-DD
   startHour: number; // 0-23
   endDate: string;   // YYYY-MM-DD
   endHour: number;   // 0-23
 }
 
-/** A sub-event box within a population bar. Can span one or multiple days. */
+/** An event box within an experiment bar. */
 export interface SubEvent {
   id: string;
   populationId: string;
   label: string;
-  startDate: string; // YYYY-MM-DD
-  startHour: number; // 0-23
-  endDate: string;   // YYYY-MM-DD
-  endHour: number;   // 0-23
+  comments: string;
+  allDay: boolean;
+  startDate: string;
+  startHour: number;
+  endDate: string;
+  endHour: number;
   color: string;
 }
 
@@ -72,7 +79,6 @@ export const PLATE_LABELS: Record<PlateType, string> = {
   'T175': 'T-175 Flask',
 };
 
-/** Whether the plate type uses "per well" or "per dish/flask" for density */
 export function densityUnit(plateType: PlateType): string {
   if (plateType.endsWith('well')) return 'M/well';
   if (plateType.startsWith('T')) return 'M/flask';
@@ -87,4 +93,9 @@ export const POPULATION_COLORS = [
 export const SUB_EVENT_COLORS = [
   '#fbbf24', '#a78bfa', '#34d399', '#f87171',
   '#60a5fa', '#fb923c', '#e879f9', '#2dd4bf',
+];
+
+export const PRESET_CELL_LINES = [
+  'HEK-293T',
+  'HEK-293T-CRE-luc-C7',
 ];
