@@ -630,12 +630,27 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         allBars.push({ pop, weekIdx, startFrac, endFrac, slot: 0 });
       });
     });
-    allBars.forEach(bar => {
-      const sameWeek = allBars.filter(b => b.weekIdx === bar.weekIdx && b !== bar);
+    // Assign each population a stable global slot so it keeps the same lane across weeks.
+    // Process populations sorted by start date so earlier ones claim lower slots first.
+    const sortedPops = [...visiblePops].sort((a, b) => a.startDate.localeCompare(b.startDate) || a.startHour - b.startHour);
+    const popSlot = new Map<string, number>();
+    for (const pop of sortedPops) {
+      const popBars = allBars.filter(b => b.pop.id === pop.id);
       let slot = 0;
-      while (sameWeek.some(b => b.slot === slot && !(bar.startFrac >= b.endFrac || bar.endFrac <= b.startFrac))) slot++;
-      bar.slot = slot;
-    });
+      // Find the lowest slot that doesn't conflict in ANY week this population appears in
+      outer: while (true) {
+        for (const pb of popBars) {
+          const conflicts = allBars.filter(b => b.pop.id !== pop.id && b.weekIdx === pb.weekIdx && popSlot.has(b.pop.id) && popSlot.get(b.pop.id) === slot);
+          if (conflicts.some(b => !(pb.startFrac >= b.endFrac || pb.endFrac <= b.startFrac))) {
+            slot++;
+            continue outer;
+          }
+        }
+        break;
+      }
+      popSlot.set(pop.id, slot);
+      for (const pb of popBars) pb.slot = slot;
+    }
     const maxSlots = weeks.map((_, wi) => {
       const bars = allBars.filter(b => b.weekIdx === wi);
       return bars.length > 0 ? Math.max(...bars.map(b => b.slot)) + 1 : 0;
