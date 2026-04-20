@@ -13,7 +13,7 @@ import {
 } from '@/types';
 import { getMonthGrid, toDateStr, isInRange, rangesOverlap, addDays, shiftDateHour } from '@/lib/dates';
 import * as storage from '@/lib/storage';
-import { onRemoteChange } from '@/lib/sync';
+import { onRemoteChange, enqueue } from '@/lib/sync';
 import CalendarHeader from './CalendarHeader';
 import EventPanel from './EventPanel';
 import NewPopulationDialog from './NewPopulationDialog';
@@ -66,6 +66,62 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const eventsRef = useRef(events);
   eventsRef.current = events;
 
+  // Persist to localStorage via debounced effect (single source of truth: React state).
+  // Also enqueues Supabase sync for each changed item.
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialMount = useRef(true);
+  const prevPopsRef = useRef(populations);
+  const prevEventsRef = useRef(events);
+  // Track whether we're currently applying remote changes (skip saving back)
+  const applyingRemote = useRef(false);
+  useEffect(() => {
+    if (initialMount.current) { initialMount.current = false; return; }
+    if (applyingRemote.current) { applyingRemote.current = false; return; }
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      // Write entire current state to localStorage
+      const allPops = storage.getItems<CellPopulation>('cell-scheduler:populations');
+      const otherPops = allPops.filter(p => p.experimentId !== experimentId);
+      storage.setItems('cell-scheduler:populations', [...otherPops, ...populations]);
+
+      const allEvts = storage.getItems<SubEvent>('cell-scheduler:subevents');
+      const popIds = new Set(populations.map(p => p.id));
+      const otherEvts = allEvts.filter(e => !popIds.has(e.populationId));
+      storage.setItems('cell-scheduler:subevents', [...otherEvts, ...events]);
+
+      // Enqueue Supabase sync for changed/added/deleted populations
+      const prevPopMap = new Map(prevPopsRef.current.map(p => [p.id, p]));
+      const curPopMap = new Map(populations.map(p => [p.id, p]));
+      for (const p of populations) {
+        if (prevPopMap.get(p.id) !== p) {
+          enqueue({ table: 'cell_populations', op: 'upsert', row: p as unknown as Record<string, unknown> });
+        }
+      }
+      for (const p of prevPopsRef.current) {
+        if (!curPopMap.has(p.id)) {
+          enqueue({ table: 'cell_populations', op: 'delete', row: { id: p.id } });
+        }
+      }
+      // Enqueue for changed/added/deleted events
+      const prevEvtMap = new Map(prevEventsRef.current.map(e => [e.id, e]));
+      const curEvtMap = new Map(events.map(e => [e.id, e]));
+      for (const e of events) {
+        if (prevEvtMap.get(e.id) !== e) {
+          enqueue({ table: 'sub_events', op: 'upsert', row: e as unknown as Record<string, unknown> });
+        }
+      }
+      for (const e of prevEventsRef.current) {
+        if (!curEvtMap.has(e.id)) {
+          enqueue({ table: 'sub_events', op: 'delete', row: { id: e.id } });
+        }
+      }
+
+      prevPopsRef.current = populations;
+      prevEventsRef.current = events;
+    }, 150);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [populations, events, experimentId]);
+
   const [selectedPopId, setSelectedPopId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
@@ -86,11 +142,18 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     };
   }, []);
 
-  // Refresh from localStorage when the sync poller brings in remote changes
+  // Refresh from localStorage when the sync poller brings in remote changes.
+  // Skip if the user is actively dragging/editing to avoid overwriting in-progress edits.
   useEffect(() => {
     const off = onRemoteChange(() => {
-      setPopulations(storage.getPopulations(experimentId));
-      setEvents(storage.getAllSubEvents(experimentId));
+      if (dragMode.current !== 'none') return; // don't clobber active drag
+      applyingRemote.current = true;
+      const newPops = storage.getPopulations(experimentId);
+      const newEvts = storage.getAllSubEvents(experimentId);
+      prevPopsRef.current = newPops;
+      prevEventsRef.current = newEvts;
+      setPopulations(newPops);
+      setEvents(newEvts);
       setConnections(storage.getConnections(experimentId));
     });
     return off;
@@ -204,7 +267,6 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       endHour: eH,
       color: SUB_EVENT_COLORS[eventsRef.current.filter(se => se.populationId === popId).length % SUB_EVENT_COLORS.length],
     };
-    storage.saveSubEvent(ev);
     setEvents(prev => [...prev, ev]);
     setSelectedEventId(ev.id);
     setSelectedPopId(popId);
@@ -296,11 +358,9 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         if (origPop) {
           const newPopId = crypto.randomUUID();
           const newPop: CellPopulation = { ...origPop, id: newPopId, name: origPop.name + ' (copy)', color: POPULATION_COLORS[(populationsRef.current.length) % POPULATION_COLORS.length] };
-          storage.savePopulation(newPop);
           // Copy all events with full data from current ref
           const origEvents = eventsRef.current.filter(ev => ev.populationId === origPopId);
           const newEvents: SubEvent[] = origEvents.map(ev => ({ ...ev, id: crypto.randomUUID(), populationId: newPopId }));
-          newEvents.forEach(ev => storage.saveSubEvent(ev));
           setPopulations(prev => [...prev, newPop]);
           setEvents(prev => [...prev, ...newEvents]);
           // Switch drag target to the new copy (original stays in place)
@@ -316,15 +376,11 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         const popId = dragTargetId.current;
         setPopulations(prev => prev.map(p => {
           if (p.id !== popId) return p;
-          const updated = { ...p, startDate: addDays(p.startDate, dayDelta), endDate: addDays(p.endDate, dayDelta) };
-          storage.savePopulation(updated);
-          return updated;
+          return { ...p, startDate: addDays(p.startDate, dayDelta), endDate: addDays(p.endDate, dayDelta) };
         }));
         setEvents(prev => prev.map(ev => {
           if (ev.populationId !== popId) return ev;
-          const updated = { ...ev, startDate: addDays(ev.startDate, dayDelta), endDate: addDays(ev.endDate, dayDelta) };
-          storage.saveSubEvent(updated);
-          return updated;
+          return { ...ev, startDate: addDays(ev.startDate, dayDelta), endDate: addDays(ev.endDate, dayDelta) };
         }));
       }
     }
@@ -337,7 +393,6 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         const origEv = eventsRef.current.find(ev => ev.id === origEvId);
         if (origEv) {
           const newEv: SubEvent = { ...origEv, id: crypto.randomUUID(), label: origEv.label + ' (copy)' };
-          storage.saveSubEvent(newEv);
           setEvents(prev => [...prev, newEv]);
           dragTargetId.current = newEv.id;
           setSelectedEventId(newEv.id);
@@ -358,9 +413,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
               const newStart = addDays(x.startDate, dayDelta);
               const newEnd = addDays(x.endDate, dayDelta);
               if (newStart < pop.startDate || newEnd > pop.endDate) return x;
-              const updated = { ...x, startDate: newStart, endDate: newEnd };
-              storage.saveSubEvent(updated);
-              return updated;
+              return { ...x, startDate: newStart, endDate: newEnd };
             }));
           }
         } else {
@@ -374,9 +427,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
               const s = shiftDateHour(x.startDate, x.startHour, hourDelta);
               const e2 = shiftDateHour(x.endDate, x.endHour, hourDelta);
               if (s.date < pop.startDate || e2.date > pop.endDate) return x;
-              const updated = { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
-              storage.saveSubEvent(updated);
-              return updated;
+              return { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
             }));
           }
         }
@@ -388,14 +439,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       setPopulations(prev => prev.map(p => {
         if (p.id !== dragTargetId.current) return p;
         if (dragMode.current === 'resize-pop-start' && (dh.date < p.endDate || (dh.date === p.endDate && dh.hour < p.endHour))) {
-          const updated = { ...p, startDate: dh.date, startHour: dh.hour };
-          storage.savePopulation(updated);
-          return updated;
+          return { ...p, startDate: dh.date, startHour: dh.hour };
         }
         if (dragMode.current === 'resize-pop-end' && (dh.date > p.startDate || (dh.date === p.startDate && dh.hour > p.startHour))) {
-          const updated = { ...p, endDate: dh.date, endHour: dh.hour };
-          storage.savePopulation(updated);
-          return updated;
+          return { ...p, endDate: dh.date, endHour: dh.hour };
         }
         return p;
       }));
@@ -406,14 +453,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       setEvents(prev => prev.map(ev => {
         if (ev.id !== dragTargetId.current) return ev;
         if (dragMode.current === 'resize-event-start' && (dh.date < ev.endDate || (dh.date === ev.endDate && dh.hour < ev.endHour))) {
-          const updated = { ...ev, startDate: dh.date, startHour: dh.hour };
-          storage.saveSubEvent(updated);
-          return updated;
+          return { ...ev, startDate: dh.date, startHour: dh.hour };
         }
         if (dragMode.current === 'resize-event-end' && (dh.date > ev.startDate || (dh.date === ev.startDate && dh.hour > ev.startHour))) {
-          const updated = { ...ev, endDate: dh.date, endHour: dh.hour };
-          storage.saveSubEvent(updated);
-          return updated;
+          return { ...ev, endDate: dh.date, endHour: dh.hour };
         }
         return ev;
       }));
@@ -469,12 +512,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       if (e.key === 'Backspace' || e.key === 'Delete') {
         if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA' || (e.target as HTMLElement).tagName === 'SELECT') return;
         if (selectedEventId) {
-          storage.deleteSubEvent(selectedEventId);
           setEvents(prev => prev.filter(ev => ev.id !== selectedEventId));
           setSelectedEventId(null);
           e.preventDefault();
         } else if (selectedPopId) {
-          storage.deletePopulation(selectedPopId);
           setPopulations(prev => prev.filter(p => p.id !== selectedPopId));
           setEvents(prev => prev.filter(ev => ev.populationId !== selectedPopId));
           setConnections(prev => prev.filter(c => c.sourcePopulationId !== selectedPopId && c.targetPopulationId !== selectedPopId));
@@ -509,7 +550,6 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         allDay: true,
         startDate: s, startHour: 0, endDate: e, endHour: 23,
       };
-      storage.savePopulation(pop);
       setPopulations(prev => [...prev, pop]);
       setDragStart(null); setDragEnd(null); setShowNewDialog(false);
       // Don't auto-open panel — just deselect
@@ -522,22 +562,18 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     setDragStart(null); setDragEnd(null); setShowNewDialog(false);
   }, []);
 
-  // Update/delete handlers
+  // Update/delete handlers — React state is the source of truth; effect persists to localStorage
   const handleUpdateEvent = useCallback((updated: SubEvent) => {
-    storage.saveSubEvent(updated);
     setEvents(prev => prev.map(e => (e.id === updated.id ? updated : e)));
   }, []);
   const handleDeleteEvent = useCallback((id: string) => {
-    storage.deleteSubEvent(id);
     setEvents(prev => prev.filter(e => e.id !== id));
     setSelectedEventId(null);
   }, []);
   const handleUpdatePopulation = useCallback((updated: CellPopulation) => {
-    storage.savePopulation(updated);
     setPopulations(prev => prev.map(p => (p.id === updated.id ? updated : p)));
   }, []);
   const handleDeletePopulation = useCallback((id: string) => {
-    storage.deletePopulation(id);
     setPopulations(prev => prev.filter(p => p.id !== id));
     setEvents(prev => prev.filter(e => e.populationId !== id));
     setConnections(prev => prev.filter(c => c.sourcePopulationId !== id && c.targetPopulationId !== id));
@@ -555,7 +591,6 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       endDate: addDays(pop.endDate, 7),
       color: POPULATION_COLORS[(populationsRef.current.length) % POPULATION_COLORS.length],
     };
-    storage.savePopulation(newPop);
     const popEvents = eventsRef.current.filter(ev => ev.populationId === popId);
     const newEvents: SubEvent[] = popEvents.map(ev => ({
       ...ev,
@@ -564,7 +599,6 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       startDate: addDays(ev.startDate, 7),
       endDate: addDays(ev.endDate, 7),
     }));
-    newEvents.forEach(ev => storage.saveSubEvent(ev));
     setPopulations(prev => [...prev, newPop]);
     setEvents(prev => [...prev, ...newEvents]);
     setSelectedPopId(newPopId);
@@ -630,8 +664,8 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         if (dd !== 0) {
           dragAnchorDate.current = dh.date;
           const pid = dragTargetId.current;
-          setPopulations(prev => prev.map(p => p.id !== pid ? p : (() => { const u = { ...p, startDate: addDays(p.startDate, dd), endDate: addDays(p.endDate, dd) }; storage.savePopulation(u); return u; })()));
-          setEvents(prev => prev.map(ev => ev.populationId !== pid ? ev : (() => { const u = { ...ev, startDate: addDays(ev.startDate, dd), endDate: addDays(ev.endDate, dd) }; storage.saveSubEvent(u); return u; })()));
+          setPopulations(prev => prev.map(p => p.id !== pid ? p : { ...p, startDate: addDays(p.startDate, dd), endDate: addDays(p.endDate, dd) }));
+          setEvents(prev => prev.map(ev => ev.populationId !== pid ? ev : { ...ev, startDate: addDays(ev.startDate, dd), endDate: addDays(ev.endDate, dd) }));
         }
       }
       if (dragMode.current === 'move-event' && dragTargetId.current && dragAnchorDate.current) {
@@ -647,7 +681,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
               if (x.id !== eid) return x;
               const ns = addDays(x.startDate, dd); const ne = addDays(x.endDate, dd);
               if (ns < pop.startDate || ne > pop.endDate) return x;
-              const u = { ...x, startDate: ns, endDate: ne }; storage.saveSubEvent(u); return u;
+              return { ...x, startDate: ns, endDate: ne };
             }));
           }
         } else {
@@ -660,7 +694,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
               const s = shiftDateHour(x.startDate, x.startHour, hourDelta);
               const e2 = shiftDateHour(x.endDate, x.endHour, hourDelta);
               if (s.date < pop.startDate || e2.date > pop.endDate) return x;
-              const u = { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour }; storage.saveSubEvent(u); return u;
+              return { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
             }));
           }
         }

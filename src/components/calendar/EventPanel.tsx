@@ -1,11 +1,45 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { SubEvent, CellPopulation, PlateType, PLATE_LABELS, densityUnit } from '@/types';
 import * as storage from '@/lib/storage';
 import PlateVisual from './PlateVisual';
 import AutocompleteInput from './AutocompleteInput';
 import { pushToLabBook } from '@/lib/github-sync';
+
+/** Hook: local copy of a prop, synced from parent but editable locally.
+ *  Changes are flushed to the parent callback after `delay` ms of inactivity. */
+function useLocalState<T>(
+  propValue: T | null,
+  onCommit: (v: T) => void,
+  delay = 300,
+): [T | null, (v: T) => void] {
+  const [local, setLocal] = useState<T | null>(propValue);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const commitRef = useRef(onCommit);
+  commitRef.current = onCommit;
+
+  // Sync from parent when the entity *identity* changes (different id)
+  const prevId = useRef<string | null>(null);
+  useEffect(() => {
+    const id = (propValue as Record<string, unknown> | null)?.id as string | undefined;
+    if (id !== prevId.current) {
+      prevId.current = id ?? null;
+      setLocal(propValue);
+    }
+  }, [propValue]);
+
+  const update = useCallback((v: T) => {
+    setLocal(v);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => commitRef.current(v), delay);
+  }, [delay]);
+
+  // Flush on unmount
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  return [local, update];
+}
 
 interface EventPanelProps {
   subEvent: SubEvent | null;
@@ -65,6 +99,10 @@ export default function EventPanel({
 }: EventPanelProps) {
   const [labBookStatus, setLabBookStatus] = useState<'idle' | 'pushing' | 'done' | 'error'>('idle');
 
+  // Local buffered state — edits are instant, flushed to parent after 300ms idle
+  const [localEvent, setLocalEvent] = useLocalState<SubEvent>(subEvent, onUpdateSubEvent);
+  const [localPop, setLocalPop] = useLocalState<CellPopulation>(population, onUpdatePopulation);
+
   // Draggable panel position (desktop only)
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
@@ -90,15 +128,15 @@ export default function EventPanel({
   }, [pos, isMobile]);
 
   const handleAddToLabBook = useCallback(async () => {
-    if (!population) return;
+    if (!localPop) return;
     setLabBookStatus('pushing');
-    const popEvents = allEvents.filter(e => e.populationId === population.id);
-    const result = await pushToLabBook(population, popEvents);
+    const popEvents = allEvents.filter(e => e.populationId === localPop.id);
+    const result = await pushToLabBook(localPop, popEvents);
     setLabBookStatus(result.ok ? 'done' : 'error');
     if (result.ok) setTimeout(() => setLabBookStatus('idle'), 3000);
-  }, [population, allEvents]);
+  }, [localPop, allEvents]);
 
-  if (!subEvent && !population) return null;
+  if (!localEvent && !localPop) return null;
 
   const desktopStyle = !isMobile && pos ? { left: pos.x, top: pos.y, right: 'auto', bottom: 'auto' } as React.CSSProperties : {};
 
@@ -114,7 +152,7 @@ export default function EventPanel({
 
       <div className="flex justify-between items-center mb-4 mt-1">
         <h3 className="text-base font-bold text-slate-800 tracking-tight">
-          {subEvent ? 'Event' : 'Experiment'}
+          {localEvent ? 'Event' : 'Experiment'}
         </h3>
         <button
           onClick={onClose}
@@ -124,109 +162,109 @@ export default function EventPanel({
         </button>
       </div>
 
-      {subEvent && (
+      {localEvent && (
         <div className="space-y-3">
           <div>
             <Label>Label</Label>
-            <Input type="text" value={subEvent.label} onChange={e => onUpdateSubEvent({ ...subEvent, label: (e.target as HTMLInputElement).value })} placeholder="e.g. Wash, Treatment, SFM" />
+            <Input type="text" value={localEvent.label} onChange={e => setLocalEvent({ ...localEvent, label: (e.target as HTMLInputElement).value })} placeholder="e.g. Wash, Treatment, SFM" />
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
               <Label>Start</Label>
-              <input type="date" autoComplete="off" value={subEvent.startDate} onChange={e => onUpdateSubEvent({ ...subEvent, startDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
+              <input type="date" autoComplete="off" value={localEvent.startDate} onChange={e => setLocalEvent({ ...localEvent, startDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
             </div>
             <div>
               <Label>End</Label>
-              <input type="date" autoComplete="off" value={subEvent.endDate} onChange={e => onUpdateSubEvent({ ...subEvent, endDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
+              <input type="date" autoComplete="off" value={localEvent.endDate} onChange={e => setLocalEvent({ ...localEvent, endDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
             </div>
           </div>
           <div className="flex items-center gap-3">
             <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={subEvent.allDay ?? true} onChange={e => onUpdateSubEvent({ ...subEvent, allDay: e.target.checked, startHour: 0, endHour: 23 })} className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+              <input type="checkbox" checked={localEvent.allDay ?? true} onChange={e => setLocalEvent({ ...localEvent, allDay: e.target.checked, startHour: 0, endHour: 23 })} className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
               <span className="text-sm text-slate-600 font-medium">All day</span>
             </label>
           </div>
-          {!(subEvent.allDay ?? true) && (
+          {!(localEvent.allDay ?? true) && (
             <div className="flex gap-2 items-end">
-              <div className="flex-1"><Label>Start Hour</Label><HourInput value={subEvent.startHour} onChange={h => onUpdateSubEvent({ ...subEvent, startHour: h })} /></div>
-              <div className="flex-1"><Label>End Hour</Label><HourInput value={subEvent.endHour} onChange={h => onUpdateSubEvent({ ...subEvent, endHour: h })} /></div>
+              <div className="flex-1"><Label>Start Hour</Label><HourInput value={localEvent.startHour} onChange={h => setLocalEvent({ ...localEvent, startHour: h })} /></div>
+              <div className="flex-1"><Label>End Hour</Label><HourInput value={localEvent.endHour} onChange={h => setLocalEvent({ ...localEvent, endHour: h })} /></div>
             </div>
           )}
           <div>
             <Label>Comments</Label>
-            <textarea autoComplete="off" value={subEvent.comments || ''} onChange={e => onUpdateSubEvent({ ...subEvent, comments: e.target.value })} placeholder="Notes about this event..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
+            <textarea autoComplete="off" value={localEvent.comments || ''} onChange={e => setLocalEvent({ ...localEvent, comments: e.target.value })} placeholder="Notes about this event..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
           </div>
           <div>
             <Label>Color</Label>
-            <input type="color" value={subEvent.color} onChange={e => onUpdateSubEvent({ ...subEvent, color: e.target.value })} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
+            <input type="color" value={localEvent.color} onChange={e => setLocalEvent({ ...localEvent, color: e.target.value })} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
           </div>
-          <button onClick={() => onDeleteSubEvent(subEvent.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
+          <button onClick={() => onDeleteSubEvent(localEvent.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
             Delete Event
           </button>
         </div>
       )}
 
-      {population && !subEvent && (
+      {localPop && !localEvent && (
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-2">
-            <div className="col-span-2"><Label>Experiment Name</Label><AutocompleteInput value={population.name} onChange={v => onUpdatePopulation({ ...population, name: v })} suggestions={storage.getAllExperimentNames()} placeholder="e.g. CRE-luc timecourse" /></div>
-            <div className="col-span-2"><Label>Experiment ID</Label><Input type="text" value={population.experimentLabel || ''} onChange={e => onUpdatePopulation({ ...population, experimentLabel: (e.target as HTMLInputElement).value })} placeholder="e.g. Exp 042" /></div>
+            <div className="col-span-2"><Label>Experiment Name</Label><AutocompleteInput value={localPop.name} onChange={v => setLocalPop({ ...localPop, name: v })} suggestions={storage.getAllExperimentNames()} placeholder="e.g. CRE-luc timecourse" /></div>
+            <div className="col-span-2"><Label>Experiment ID</Label><Input type="text" value={localPop.experimentLabel || ''} onChange={e => setLocalPop({ ...localPop, experimentLabel: (e.target as HTMLInputElement).value })} placeholder="e.g. Exp 042" /></div>
             <div>
               <Label>Cell Line</Label>
-              <AutocompleteInput value={population.cellLine} onChange={v => onUpdatePopulation({ ...population, cellLine: v })} suggestions={storage.getAllCellLines()} placeholder="e.g. HEK-293T" />
+              <AutocompleteInput value={localPop.cellLine} onChange={v => setLocalPop({ ...localPop, cellLine: v })} suggestions={storage.getAllCellLines()} placeholder="e.g. HEK-293T" />
             </div>
-            <div><Label>Passage #</Label><Input type="text" value={population.passage} onChange={e => onUpdatePopulation({ ...population, passage: (e.target as HTMLInputElement).value })} placeholder="e.g. 12" /></div>
-            <div><Label>Experimenter</Label><Input type="text" value={population.experimenter} onChange={e => onUpdatePopulation({ ...population, experimenter: (e.target as HTMLInputElement).value })} placeholder="e.g. Nikolay" /></div>
+            <div><Label>Passage #</Label><Input type="text" value={localPop.passage} onChange={e => setLocalPop({ ...localPop, passage: (e.target as HTMLInputElement).value })} placeholder="e.g. 12" /></div>
+            <div><Label>Experimenter</Label><Input type="text" value={localPop.experimenter} onChange={e => setLocalPop({ ...localPop, experimenter: (e.target as HTMLInputElement).value })} placeholder="e.g. Nikolay" /></div>
             <div>
               <Label>Plate Type</Label>
-              <select autoComplete="off" value={population.plateType} onChange={e => onUpdatePopulation({ ...population, plateType: e.target.value as PlateType })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none">
+              <select autoComplete="off" value={localPop.plateType} onChange={e => setLocalPop({ ...localPop, plateType: e.target.value as PlateType })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none">
                 {Object.entries(PLATE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
             </div>
-            <div><Label>Plate Count</Label><Input type="number" min={1} value={population.plateCount} onChange={e => onUpdatePopulation({ ...population, plateCount: parseInt((e.target as HTMLInputElement).value) || 1 })} /></div>
-            <div><Label>Density ({densityUnit(population.plateType)})</Label><Input type="text" value={population.cellDensity} onChange={e => onUpdatePopulation({ ...population, cellDensity: (e.target as HTMLInputElement).value })} placeholder="e.g. 0.5" /></div>
+            <div><Label>Plate Count</Label><Input type="number" min={1} value={localPop.plateCount} onChange={e => setLocalPop({ ...localPop, plateCount: parseInt((e.target as HTMLInputElement).value) || 1 })} /></div>
+            <div><Label>Density ({densityUnit(localPop.plateType)})</Label><Input type="text" value={localPop.cellDensity} onChange={e => setLocalPop({ ...localPop, cellDensity: (e.target as HTMLInputElement).value })} placeholder="e.g. 0.5" /></div>
           </div>
           <div className="flex items-center justify-center bg-slate-50 rounded-lg p-2">
-            <PlateVisual plateType={population.plateType} count={population.plateCount} size={34} />
+            <PlateVisual plateType={localPop.plateType} count={localPop.plateCount} size={34} />
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
               <Label>Seed Date</Label>
-              <input type="date" autoComplete="off" value={population.startDate} onChange={e => onUpdatePopulation({ ...population, startDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
+              <input type="date" autoComplete="off" value={localPop.startDate} onChange={e => setLocalPop({ ...localPop, startDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
             </div>
             <div>
               <Label>Harvest Date</Label>
-              <input type="date" autoComplete="off" value={population.endDate} onChange={e => onUpdatePopulation({ ...population, endDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
+              <input type="date" autoComplete="off" value={localPop.endDate} onChange={e => setLocalPop({ ...localPop, endDate: e.target.value })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none" />
             </div>
           </div>
           <div className="flex items-center gap-3">
             <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={population.allDay ?? true} onChange={e => onUpdatePopulation({ ...population, allDay: e.target.checked, startHour: 0, endHour: 23 })} className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+              <input type="checkbox" checked={localPop.allDay ?? true} onChange={e => setLocalPop({ ...localPop, allDay: e.target.checked, startHour: 0, endHour: 23 })} className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
               <span className="text-sm text-slate-600 font-medium">All day</span>
             </label>
           </div>
-          {!(population.allDay ?? true) && (
+          {!(localPop.allDay ?? true) && (
             <div className="flex gap-2 items-end">
-              <div className="flex-1"><Label>Start Hour</Label><HourInput value={population.startHour} onChange={h => onUpdatePopulation({ ...population, startHour: h })} /></div>
-              <div className="flex-1"><Label>End Hour</Label><HourInput value={population.endHour} onChange={h => onUpdatePopulation({ ...population, endHour: h })} /></div>
+              <div className="flex-1"><Label>Start Hour</Label><HourInput value={localPop.startHour} onChange={h => setLocalPop({ ...localPop, startHour: h })} /></div>
+              <div className="flex-1"><Label>End Hour</Label><HourInput value={localPop.endHour} onChange={h => setLocalPop({ ...localPop, endHour: h })} /></div>
             </div>
           )}
           <div>
             <Label>Comments</Label>
-            <textarea autoComplete="off" value={population.comments || ''} onChange={e => onUpdatePopulation({ ...population, comments: e.target.value })} placeholder="Notes about this experiment..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
+            <textarea autoComplete="off" value={localPop.comments || ''} onChange={e => setLocalPop({ ...localPop, comments: e.target.value })} placeholder="Notes about this experiment..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
           </div>
           <div>
             <Label>Color</Label>
-            <input type="color" value={population.color} onChange={e => onUpdatePopulation({ ...population, color: e.target.value })} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
+            <input type="color" value={localPop.color} onChange={e => setLocalPop({ ...localPop, color: e.target.value })} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
           </div>
           <div className="pt-1 space-y-2">
             <button onClick={handleAddToLabBook} disabled={labBookStatus === 'pushing'} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-100 transition-colors disabled:opacity-50">
               {labBookStatus === 'pushing' ? 'Pushing...' : labBookStatus === 'done' ? 'Added!' : labBookStatus === 'error' ? 'Failed — retry?' : 'Add to Lab Book'}
             </button>
-            <button onClick={() => onRepeatNextWeek(population.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 transition-colors">
+            <button onClick={() => onRepeatNextWeek(localPop.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 transition-colors">
               Repeat Next Week
             </button>
-            <button onClick={() => onDeletePopulation(population.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
+            <button onClick={() => onDeletePopulation(localPop.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
               Delete Experiment
             </button>
           </div>
