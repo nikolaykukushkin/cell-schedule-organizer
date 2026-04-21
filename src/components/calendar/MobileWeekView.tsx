@@ -24,6 +24,11 @@ const EDGE_FRAC = 0.25;
 const EDGE_MAX_PX = 40;
 const DOUBLE_TAP_MS = 400;
 
+// Per-experiment lane memo for mobile portrait — same idea as the desktop memo: each
+// population keeps its column across renders unless its current column collides with
+// another. Critical during resize so dates changing doesn't shuffle columns.
+const portraitSlotMemo = new Map<string, Map<string, number>>();
+
 const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -230,22 +235,40 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
     setSelectedPopId(newPopId); setSelectedEventId(null);
   }, [populations, events]);
 
-  // Touch → date. During an active drag the finger usually sits on top of a bar,
-  // which hides the underlying day cell from elementFromPoint. Fall back to a
+  // Touch → day element. During an active drag the finger usually sits on top of a
+  // bar, which hides the underlying day cell from elementFromPoint. Fall back to a
   // geometric scan over all [data-day] elements so dragging still tracks the day.
-  const getDateFromTouch = useCallback((clientX: number, clientY: number): string | null => {
+  const findDayElAt = useCallback((clientX: number, clientY: number): HTMLElement | null => {
     const hit = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
     const direct = hit?.closest('[data-day]') as HTMLElement | null;
-    if (direct) return direct.dataset.day || null;
+    if (direct) return direct;
     const nodes = document.querySelectorAll<HTMLElement>('[data-day]');
     for (const el of nodes) {
       const r = el.getBoundingClientRect();
       if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
-        return el.dataset.day || null;
+        return el;
       }
     }
     return null;
   }, []);
+  const getDateFromTouch = useCallback((clientX: number, clientY: number): string | null => {
+    return findDayElAt(clientX, clientY)?.dataset.day || null;
+  }, [findDayElAt]);
+  // Sub-day precision for resize: pick the hour from the touch position within the
+  // day cell. In portrait days are rows (time maps to Y); in landscape days are
+  // columns (time maps to X).
+  const getDateHourFromTouch = useCallback((clientX: number, clientY: number): { date: string; hour: number } | null => {
+    const el = findDayElAt(clientX, clientY);
+    if (!el) return null;
+    const date = el.dataset.day;
+    if (!date) return null;
+    const r = el.getBoundingClientRect();
+    const frac = orientation === 'portrait'
+      ? (clientY - r.top) / Math.max(1, r.height)
+      : (clientX - r.left) / Math.max(1, r.width);
+    const hour = Math.max(0, Math.min(23, Math.floor(frac * 24)));
+    return { date, hour };
+  }, [findDayElAt, orientation]);
 
   // Track whether the current touch started on a blank cell so touchEnd can tell a
   // "tap to deselect" from a "tap on bar" (which clears this ref implicitly).
@@ -315,33 +338,37 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
   const hasAnySelection = selectedPopId !== null || selectedEventId !== null;
 
   // Resize commit: touchmove while activeResize is set → update the affected record's
-  // start or end date to the day currently under the finger.
-  const resizePopToDate = useCallback((popId: string, edge: 'start' | 'end', date: string) => {
+  // start or end boundary to the day+hour currently under the finger. Hour gives
+  // sub-day precision so dragging feels smooth.
+  const resizePopToDateHour = useCallback((popId: string, edge: 'start' | 'end', date: string, hour: number) => {
     setPopulations(prev => prev.map(p => {
       if (p.id !== popId) return p;
       if (edge === 'start') {
-        if (date > p.endDate) return p;
-        return { ...p, startDate: date };
+        if (date > p.endDate || (date === p.endDate && hour > p.endHour)) return p;
+        return { ...p, startDate: date, startHour: hour };
       } else {
-        if (date < p.startDate) return p;
-        return { ...p, endDate: date };
+        if (date < p.startDate || (date === p.startDate && hour < p.startHour)) return p;
+        return { ...p, endDate: date, endHour: hour };
       }
     }));
   }, []);
 
-  const resizeEventToDate = useCallback((evtId: string, edge: 'start' | 'end', date: string) => {
+  const resizeEventToDateHour = useCallback((evtId: string, edge: 'start' | 'end', date: string, hour: number) => {
     setEvents(prev => prev.map(ev => {
       if (ev.id !== evtId) return ev;
       const pop = populations.find(p => p.id === ev.populationId);
-      const clampedDate = pop
-        ? (date < pop.startDate ? pop.startDate : date > pop.endDate ? pop.endDate : date)
-        : date;
+      // Clamp to parent pop's range.
+      let d = date, h = hour;
+      if (pop) {
+        if (d < pop.startDate || (d === pop.startDate && h < pop.startHour)) { d = pop.startDate; h = pop.startHour; }
+        if (d > pop.endDate || (d === pop.endDate && h > pop.endHour)) { d = pop.endDate; h = pop.endHour; }
+      }
       if (edge === 'start') {
-        if (clampedDate > ev.endDate) return ev;
-        return { ...ev, startDate: clampedDate };
+        if (d > ev.endDate || (d === ev.endDate && h > ev.endHour)) return ev;
+        return { ...ev, startDate: d, startHour: h, allDay: false };
       } else {
-        if (clampedDate < ev.startDate) return ev;
-        return { ...ev, endDate: clampedDate };
+        if (d < ev.startDate || (d === ev.startDate && h < ev.startHour)) return ev;
+        return { ...ev, endDate: d, endHour: h, allDay: false };
       }
     }));
   }, [populations]);
@@ -470,12 +497,12 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
       }
       return;
     }
-    // If a resize is active, update the target entity's boundary.
+    // If a resize is active, update the target entity's boundary with sub-day precision.
     if (activeResize) {
-      const d = getDateFromTouch(t.clientX, t.clientY);
-      if (!d) return;
-      if (activeResize.kind === 'pop') resizePopToDate(activeResize.id, activeResize.edge, d);
-      else resizeEventToDate(activeResize.id, activeResize.edge, d);
+      const dh = getDateHourFromTouch(t.clientX, t.clientY);
+      if (!dh) return;
+      if (activeResize.kind === 'pop') resizePopToDateHour(activeResize.id, activeResize.edge, dh.date, dh.hour);
+      else resizeEventToDateHour(activeResize.id, activeResize.edge, dh.date, dh.hour);
       return;
     }
     // If an event-create drag is active, extend its end date to the finger position.
@@ -500,7 +527,7 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
     }
     const d = getDateFromTouch(t.clientX, t.clientY);
     if (d) setDragEnd(d);
-  }, [getDateFromTouch, activeResize, activeEventCreate, resizePopToDate, resizeEventToDate, movePopByDays, moveEventByDays]);
+  }, [getDateFromTouch, getDateHourFromTouch, activeResize, activeEventCreate, resizePopToDateHour, resizeEventToDateHour, movePopByDays, moveEventByDays]);
 
   const onTouchEnd = useCallback(() => {
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
@@ -527,22 +554,53 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
   const dragRange = dragStart && dragEnd ? { start: dragStart < dragEnd ? dragStart : dragEnd, end: dragStart < dragEnd ? dragEnd : dragStart } : null;
 
   // Global slot assignment — each population keeps the same column across every week
-  // it spans, so a multi-week experiment reads as one continuous strip instead of
-  // unrelated per-week bars. Portrait mode uses this; landscape keeps per-week slots.
+  // it spans AND across re-renders (so resizing doesn't shuffle columns). A pop only
+  // moves to a new column when its remembered column collides with another.
   const portraitSlots = useMemo(() => {
-    const sorted = [...populations].sort(
-      (a, b) => a.startDate.localeCompare(b.startDate) || a.id.localeCompare(b.id),
-    );
-    const occupied: { slot: number; start: string; end: string }[] = [];
-    const result: Record<string, number> = {};
-    for (const pop of sorted) {
-      let slot = 0;
-      while (occupied.some(o => o.slot === slot && !(pop.startDate > o.end || pop.endDate < o.start))) slot++;
-      occupied.push({ slot, start: pop.startDate, end: pop.endDate });
-      result[pop.id] = slot;
+    const memo = portraitSlotMemo.get(experimentId) ?? new Map<string, number>();
+    const assignment = new Map<string, number>();
+    const popById = new Map(populations.map(p => [p.id, p] as const));
+
+    const slotConflicts = (popId: string, slot: number) => {
+      const pop = popById.get(popId);
+      if (!pop) return false;
+      for (const [otherId, otherSlot] of assignment) {
+        if (otherSlot !== slot) continue;
+        const other = popById.get(otherId);
+        if (!other) continue;
+        if (pop.startDate <= other.endDate && pop.endDate >= other.startDate) return true;
+      }
+      return false;
+    };
+
+    const memoized = populations
+      .filter(p => memo.has(p.id))
+      .sort((a, b) => (memo.get(a.id)! - memo.get(b.id)!) || a.id.localeCompare(b.id));
+    const fresh = populations
+      .filter(p => !memo.has(p.id))
+      .sort((a, b) => a.startDate.localeCompare(b.startDate) || a.id.localeCompare(b.id));
+
+    for (const pop of [...memoized, ...fresh]) {
+      const preferred = memo.get(pop.id);
+      let slot: number;
+      if (preferred !== undefined && !slotConflicts(pop.id, preferred)) slot = preferred;
+      else {
+        slot = 0;
+        while (slotConflicts(pop.id, slot)) slot++;
+      }
+      assignment.set(pop.id, slot);
     }
+
+    const next = new Map(memo);
+    for (const [id, slot] of assignment) next.set(id, slot);
+    const liveIds = new Set(populations.map(p => p.id));
+    for (const id of Array.from(next.keys())) if (!liveIds.has(id)) next.delete(id);
+    portraitSlotMemo.set(experimentId, next);
+
+    const result: Record<string, number> = {};
+    for (const [id, slot] of assignment) result[id] = slot;
     return result;
-  }, [populations]);
+  }, [populations, experimentId]);
   const portraitSlotCount = useMemo(() => {
     const vals = Object.values(portraitSlots);
     return vals.length > 0 ? Math.max(...vals) + 1 : 1;
@@ -952,8 +1010,16 @@ function PortraitWeek(p: WeekProps) {
                   <div
                     key={ev.id}
                     data-event-v
-                    className={`absolute left-0 right-0 rounded-md flex items-center justify-center ${isEvSel ? 'ring-2 ring-white shadow-lg' : 'shadow'}`}
-                    style={{ top: `${evTopPct}%`, height: `${evHPct}%`, backgroundColor: ev.color + 'd0', touchAction: 'none' }}
+                    className={`absolute left-0 right-0 rounded-md flex items-center justify-center ${isEvSel ? 'z-20' : ''}`}
+                    style={{
+                      top: `${evTopPct}%`,
+                      height: `${evHPct}%`,
+                      backgroundColor: ev.color + 'd0',
+                      touchAction: 'none',
+                      boxShadow: isEvSel
+                        ? '0 0 0 2px #fff, 0 0 0 5px #4f46e5, 0 0 24px 6px rgba(79,70,229,0.65)'
+                        : '0 1px 3px rgba(0,0,0,0.15)',
+                    }}
                     onTouchStart={(e) => {
                       e.stopPropagation();
                       const t = e.touches[0];
@@ -1216,8 +1282,16 @@ function LandscapeWeek(p: WeekProps) {
                   <div
                     key={ev.id}
                     data-event-h
-                    className={`absolute top-0.5 bottom-0.5 rounded flex items-center justify-center ${isEvSel ? 'ring-2 ring-white' : 'shadow'}`}
-                    style={{ left: `${evLeft}%`, width: `${evW}%`, backgroundColor: ev.color + 'd0', touchAction: 'none' }}
+                    className={`absolute top-0.5 bottom-0.5 rounded flex items-center justify-center ${isEvSel ? 'z-20' : ''}`}
+                    style={{
+                      left: `${evLeft}%`,
+                      width: `${evW}%`,
+                      backgroundColor: ev.color + 'd0',
+                      touchAction: 'none',
+                      boxShadow: isEvSel
+                        ? '0 0 0 2px #fff, 0 0 0 5px #4f46e5, 0 0 24px 6px rgba(79,70,229,0.65)'
+                        : '0 1px 3px rgba(0,0,0,0.15)',
+                    }}
                     onTouchStart={(e) => {
                       e.stopPropagation();
                       const t = e.touches[0];
