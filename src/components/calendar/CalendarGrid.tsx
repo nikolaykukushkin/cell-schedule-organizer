@@ -129,11 +129,9 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
 
   const [selectedPopId, setSelectedPopId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  // Panel visibility split from selection: one click highlights, a second quick
-  // click on the same item opens the parameters panel — same model as mobile.
+  // Panel visibility split from selection: single click highlights, double
+  // click opens the parameters panel.
   const [panelVisible, setPanelVisible] = useState(false);
-  const DOUBLE_CLICK_MS = 400;
-  const lastClickRef = useRef<{ kind: 'pop' | 'event'; id: string; time: number } | null>(null);
 
   // Mobile detection + orientation
   const [isMobile, setIsMobile] = useState(false);
@@ -544,42 +542,36 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     }
   }, [dragStart, dragEnd, cancelLongPress]);
 
-  // Click on bar without drag: first click highlights, second click within
-  // DOUBLE_CLICK_MS on the same bar opens the parameters panel.
+  // Single click on a bar only highlights; the panel opens on double-click.
   const handleBarClick = useCallback((popId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if ((e.target as HTMLElement).closest('[data-event-box]')) return;
-    const now = Date.now();
-    const prev = lastClickRef.current;
-    const alreadyHighlighted = selectedPopId === popId && !selectedEventId;
-    const isDoubleClick = alreadyHighlighted
-      && prev?.kind === 'pop' && prev.id === popId && now - prev.time < DOUBLE_CLICK_MS;
-    if (isDoubleClick) {
-      setPanelVisible(true);
-    } else {
-      setSelectedPopId(popId);
-      setSelectedEventId(null);
-      setPanelVisible(false);
-    }
-    lastClickRef.current = { kind: 'pop', id: popId, time: now };
-  }, [selectedPopId, selectedEventId]);
+    setSelectedPopId(popId);
+    setSelectedEventId(null);
+    setPanelVisible(false);
+  }, []);
+
+  const handleBarDoubleClick = useCallback((popId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if ((e.target as HTMLElement).closest('[data-event-box]')) return;
+    setSelectedPopId(popId);
+    setSelectedEventId(null);
+    setPanelVisible(true);
+  }, []);
 
   const handleEventClick = useCallback((eventId: string, popId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const now = Date.now();
-    const prev = lastClickRef.current;
-    const alreadyHighlighted = selectedEventId === eventId;
-    const isDoubleClick = alreadyHighlighted
-      && prev?.kind === 'event' && prev.id === eventId && now - prev.time < DOUBLE_CLICK_MS;
-    if (isDoubleClick) {
-      setPanelVisible(true);
-    } else {
-      setSelectedEventId(eventId);
-      setSelectedPopId(popId);
-      setPanelVisible(false);
-    }
-    lastClickRef.current = { kind: 'event', id: eventId, time: now };
-  }, [selectedEventId]);
+    setSelectedEventId(eventId);
+    setSelectedPopId(popId);
+    setPanelVisible(false);
+  }, []);
+
+  const handleEventDoubleClick = useCallback((eventId: string, popId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedEventId(eventId);
+    setSelectedPopId(popId);
+    setPanelVisible(true);
+  }, []);
 
   // --- Keyboard: Delete key ---
   useEffect(() => {
@@ -1088,6 +1080,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
                           }, LONG_PRESS_MS);
                         }}
                         onClick={(e) => handleBarClick(bar.pop.id, e)}
+                        onDoubleClick={(e) => handleBarDoubleClick(bar.pop.id, e)}
                       >
                         {/* Declared inner rectangle — shows the experiment's actual
                             bounds when the outer bar is extended past them. */}
@@ -1157,6 +1150,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
                               `}
                               style={{ left: `${evLeftPct}%`, width: `${evWidthPct}%`, backgroundColor: ev.color + 'e0', backdropFilter: 'blur(2px)' }}
                               onClick={(e) => handleEventClick(ev.id, ev.populationId, e)}
+                              onDoubleClick={(e) => handleEventDoubleClick(ev.id, ev.populationId, e)}
                               onMouseDown={(e) => handleEventMouseDown(ev.id, e)}
                             >
                               <span className="text-[13px] font-bold text-white truncate px-2 drop-shadow-sm pointer-events-none">{displayEventLabel(ev)}</span>
