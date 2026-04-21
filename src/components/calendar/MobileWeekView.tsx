@@ -24,6 +24,13 @@ const EDGE_FRAC = 0.25;
 const EDGE_MAX_PX = 40;
 const DOUBLE_TAP_MS = 400;
 
+// Inset for sub-events inside a bar so the bar always has a visible "lip" on
+// each long side that the user can tap or drag — otherwise an event-packed
+// experiment would be unselectable. Portrait bars are vertical (lips = L/R);
+// landscape bars are horizontal (lips = T/B).
+const PORT_EVENT_INSET_X = 10;
+const LAND_EVENT_INSET_Y = 6;
+
 // Per-experiment lane memo for mobile portrait — same idea as the desktop memo: each
 // population keeps its column across renders unless its current column collides with
 // another. Critical during resize so dates changing doesn't shuffle columns.
@@ -1025,6 +1032,21 @@ function PortraitWeek(p: WeekProps) {
                 />
               )}
 
+              {/* Side lips: always-visible draggable strips on the bar edges so the
+                  experiment stays tappable even when it's packed with events. */}
+              <div
+                className="absolute top-1 bottom-1 left-0 pointer-events-none flex items-center justify-center"
+                style={{ width: PORT_EVENT_INSET_X }}
+              >
+                <div className="w-0.5 rounded-full" style={{ height: 22, backgroundColor: pop.color + 'a0' }} />
+              </div>
+              <div
+                className="absolute top-1 bottom-1 right-0 pointer-events-none flex items-center justify-center"
+                style={{ width: PORT_EVENT_INSET_X }}
+              >
+                <div className="w-0.5 rounded-full" style={{ height: 22, backgroundColor: pop.color + 'a0' }} />
+              </div>
+
               <div className="absolute inset-0 flex flex-col items-stretch px-1 py-1.5 pointer-events-none overflow-hidden">
                 <span
                   className="text-[11px] font-bold leading-tight break-words text-center"
@@ -1059,8 +1081,14 @@ function PortraitWeek(p: WeekProps) {
                 const hPct = ((botDays - topDays) / span) * 100;
                 return (
                   <div
-                    className="absolute left-0 right-0 rounded-md ring-2 ring-white/70 pointer-events-none"
-                    style={{ top: `${topPct}%`, height: `${hPct}%`, backgroundColor: pop.color + 'b0' }}
+                    className="absolute rounded-md ring-2 ring-white/70 pointer-events-none"
+                    style={{
+                      top: `${topPct}%`,
+                      height: `${hPct}%`,
+                      left: PORT_EVENT_INSET_X,
+                      right: PORT_EVENT_INSET_X,
+                      backgroundColor: pop.color + 'b0',
+                    }}
                   />
                 );
               })()}
@@ -1080,10 +1108,12 @@ function PortraitWeek(p: WeekProps) {
                   <div
                     key={ev.id}
                     data-event-v
-                    className={`absolute left-0 right-0 rounded-md flex items-center justify-center ${isEvSel ? 'z-20' : ''}`}
+                    className={`absolute rounded-md flex items-center justify-center ${isEvSel ? 'z-20' : ''}`}
                     style={{
                       top: `${evTopPct}%`,
                       height: `${evHPct}%`,
+                      left: PORT_EVENT_INSET_X,
+                      right: PORT_EVENT_INSET_X,
                       backgroundColor: ev.color + 'd0',
                       touchAction: 'none',
                       boxShadow: isEvSel
@@ -1353,6 +1383,20 @@ function LandscapeWeek(p: WeekProps) {
                 />
               )}
 
+              {/* Top/bottom lips with small grip marks. */}
+              <div
+                className="absolute left-1 right-1 top-0 pointer-events-none flex items-center justify-center"
+                style={{ height: LAND_EVENT_INSET_Y }}
+              >
+                <div className="h-0.5 rounded-full" style={{ width: 22, backgroundColor: pop.color + 'a0' }} />
+              </div>
+              <div
+                className="absolute left-1 right-1 bottom-0 pointer-events-none flex items-center justify-center"
+                style={{ height: LAND_EVENT_INSET_Y }}
+              >
+                <div className="h-0.5 rounded-full" style={{ width: 22, backgroundColor: pop.color + 'a0' }} />
+              </div>
+
               <div className="flex flex-col justify-center h-full px-2 pointer-events-none overflow-hidden">
                 <span className="text-[11px] font-bold truncate leading-tight" style={{ color: pop.color }}>
                   {platesLabel(pop.plateType, pop.plateCount)}
@@ -1376,8 +1420,14 @@ function LandscapeWeek(p: WeekProps) {
                 const wP = ((rightDays - leftDays) / span) * 100;
                 return (
                   <div
-                    className="absolute top-0.5 bottom-0.5 rounded ring-2 ring-white/70 pointer-events-none"
-                    style={{ left: `${leftP}%`, width: `${wP}%`, backgroundColor: pop.color + 'b0' }}
+                    className="absolute rounded ring-2 ring-white/70 pointer-events-none"
+                    style={{
+                      left: `${leftP}%`,
+                      width: `${wP}%`,
+                      top: LAND_EVENT_INSET_Y,
+                      bottom: LAND_EVENT_INSET_Y,
+                      backgroundColor: pop.color + 'b0',
+                    }}
                   />
                 );
               })()}
@@ -1395,10 +1445,12 @@ function LandscapeWeek(p: WeekProps) {
                   <div
                     key={ev.id}
                     data-event-h
-                    className={`absolute top-0.5 bottom-0.5 rounded flex items-center justify-center ${isEvSel ? 'z-20' : ''}`}
+                    className={`absolute rounded flex items-center justify-center ${isEvSel ? 'z-20' : ''}`}
                     style={{
                       left: `${evLeft}%`,
                       width: `${evW}%`,
+                      top: LAND_EVENT_INSET_Y,
+                      bottom: LAND_EVENT_INSET_Y,
                       backgroundColor: ev.color + 'd0',
                       touchAction: 'none',
                       boxShadow: isEvSel
