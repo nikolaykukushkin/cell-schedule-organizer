@@ -29,6 +29,21 @@ const DOUBLE_TAP_MS = 400;
 // another. Critical during resize so dates changing doesn't shuffle columns.
 const portraitSlotMemo = new Map<string, Map<string, number>>();
 
+// A population's *extended* range is its declared range widened to include any of
+// its events that fell outside (typically because the user shrank the pop later —
+// e.g. a pre-coating event left on the day before a 3-day experiment). The solid
+// declared region stays; a semi-transparent halo shows the extension.
+function computePopExt(pop: CellPopulation, events: SubEvent[]): { extStart: string; extEnd: string } {
+  let extStart = pop.startDate;
+  let extEnd = pop.endDate;
+  for (const ev of events) {
+    if (ev.populationId !== pop.id) continue;
+    if (ev.startDate < extStart) extStart = ev.startDate;
+    if (ev.endDate > extEnd) extEnd = ev.endDate;
+  }
+  return { extStart, extEnd };
+}
+
 const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -778,16 +793,20 @@ interface WeekProps {
 function PortraitWeek(p: WeekProps) {
   const weekStart = toDateStr(p.week[0]);
   const weekEnd = toDateStr(p.week[6]);
-  const visible = p.populations.filter(pop => rangesOverlap(pop.startDate, pop.endDate, weekStart, weekEnd));
+  // A pop is visible in this week if its *extended* range (declared + outside events)
+  // overlaps the week. This keeps orphan events showing inside the extension halo.
+  const visible = p.populations
+    .map(pop => ({ pop, ...computePopExt(pop, p.events) }))
+    .filter(({ extStart, extEnd }) => rangesOverlap(extStart, extEnd, weekStart, weekEnd));
 
   // Per-week fallback slot assignment (only used if caller didn't supply global slots).
   const localSlots = useMemo(() => {
     const result: Record<string, number> = {};
-    const sorted = [...visible].sort((a, b) => a.startDate.localeCompare(b.startDate));
+    const sorted = [...visible].sort((a, b) => a.extStart.localeCompare(b.extStart));
     const occupied: { slot: number; start: string; end: string }[] = [];
-    for (const pop of sorted) {
-      const sDate = pop.startDate > weekStart ? pop.startDate : weekStart;
-      const eDate = pop.endDate < weekEnd ? pop.endDate : weekEnd;
+    for (const { pop, extStart, extEnd } of sorted) {
+      const sDate = extStart > weekStart ? extStart : weekStart;
+      const eDate = extEnd < weekEnd ? extEnd : weekEnd;
       let slot = 0;
       while (occupied.some(o => o.slot === slot && !(sDate > o.end || eDate < o.start))) slot++;
       occupied.push({ slot, start: sDate, end: eDate });
@@ -852,24 +871,47 @@ function PortraitWeek(p: WeekProps) {
         })}
 
         {/* Vertical bars */}
-        {visible.map(pop => {
+        {visible.map(({ pop, extStart, extEnd }) => {
           const slot = slots[pop.id];
-          const barStartDate = pop.startDate > weekStart ? pop.startDate : weekStart;
-          const barEndDate = pop.endDate < weekEnd ? pop.endDate : weekEnd;
-          const startOffsetDays = daysBetween(weekStart, barStartDate);
-          const endOffsetDays = daysBetween(weekStart, barEndDate);
-          // When the experiment continues into the previous/next week, let the bar flow
-          // flush to the week edge (no rounding, no padding) so it reads as one strip
-          // across the WeekHeader break.
-          const continuesAbove = pop.startDate < weekStart;
-          const continuesBelow = pop.endDate > weekEnd;
-          const top = continuesAbove ? 0 : startOffsetDays * DAY_ROW_H + 3;
-          const bottom = continuesBelow ? totalHeight : (endOffsetDays + 1) * DAY_ROW_H - 3;
+          const hasExtension = extStart < pop.startDate || extEnd > pop.endDate;
+
+          // Extended bar covers extStart..extEnd clipped to this week.
+          const extBarStart = extStart > weekStart ? extStart : weekStart;
+          const extBarEnd = extEnd < weekEnd ? extEnd : weekEnd;
+          const extContinuesAbove = extStart < weekStart;
+          const extContinuesBelow = extEnd > weekEnd;
+          const extStartOffsetDays = daysBetween(weekStart, extBarStart);
+          const extEndOffsetDays = daysBetween(weekStart, extBarEnd);
+          const top = extContinuesAbove ? 0 : extStartOffsetDays * DAY_ROW_H + 3;
+          const bottom = extContinuesBelow ? totalHeight : (extEndOffsetDays + 1) * DAY_ROW_H - 3;
+
+          // Declared region within this week (may be absent if all of declared is
+          // in another week but events pulled the extension into this week).
+          const declaredInWeek = rangesOverlap(pop.startDate, pop.endDate, weekStart, weekEnd);
+          const decStartInWeek = pop.startDate > weekStart ? pop.startDate : weekStart;
+          const decEndInWeek = pop.endDate < weekEnd ? pop.endDate : weekEnd;
+          const decContinuesAbove = pop.startDate < weekStart;
+          const decContinuesBelow = pop.endDate > weekEnd;
+          const decTopAbs = declaredInWeek
+            ? (decContinuesAbove ? 0 : daysBetween(weekStart, decStartInWeek) * DAY_ROW_H + 3)
+            : null;
+          const decBottomAbs = declaredInWeek
+            ? (decContinuesBelow ? totalHeight : (daysBetween(weekStart, decEndInWeek) + 1) * DAY_ROW_H - 3)
+            : null;
+
           const isSelected = p.selectedPopId === pop.id && !p.selectedEventId;
+          // Show every event that overlaps the extended range so orphaned events
+          // remain visible inside the halo.
           const barEvents = p.events.filter(ev =>
             ev.populationId === pop.id &&
-            rangesOverlap(ev.startDate, ev.endDate, barStartDate, barEndDate)
+            rangesOverlap(ev.startDate, ev.endDate, extBarStart, extBarEnd)
           );
+
+          // Outer bar styling: if there's an extension, fade the outer so the inner
+          // declared rectangle reads as the "real" experiment bounds.
+          const outerBg = hasExtension ? pop.color + '0a' : pop.color + '18';
+          const outerBorderColor = hasExtension ? pop.color + '55' : pop.color + '80';
+          const outerBorderStyle = hasExtension ? 'dashed' : 'solid';
 
           return (
             <div
@@ -881,14 +923,14 @@ function PortraitWeek(p: WeekProps) {
                 height: bottom - top,
                 left: `calc(${slot * laneWPct}% + 2px)`,
                 width: `calc(${laneWPct}% - 4px)`,
-                backgroundColor: pop.color + '18',
-                border: `2px solid ${pop.color}80`,
-                borderTopWidth: continuesAbove ? 0 : 2,
-                borderBottomWidth: continuesBelow ? 0 : 2,
-                borderTopLeftRadius: continuesAbove ? 0 : 12,
-                borderTopRightRadius: continuesAbove ? 0 : 12,
-                borderBottomLeftRadius: continuesBelow ? 0 : 12,
-                borderBottomRightRadius: continuesBelow ? 0 : 12,
+                backgroundColor: outerBg,
+                border: `2px ${outerBorderStyle} ${outerBorderColor}`,
+                borderTopWidth: extContinuesAbove ? 0 : 2,
+                borderBottomWidth: extContinuesBelow ? 0 : 2,
+                borderTopLeftRadius: extContinuesAbove ? 0 : 12,
+                borderTopRightRadius: extContinuesAbove ? 0 : 12,
+                borderBottomLeftRadius: extContinuesBelow ? 0 : 12,
+                borderBottomRightRadius: extContinuesBelow ? 0 : 12,
                 // Block default scroll so drag-to-move works. Users scroll weeks via
                 // empty cells or the day-label column.
                 touchAction: 'none',
@@ -903,12 +945,18 @@ function PortraitWeek(p: WeekProps) {
                 const rect = barEl.getBoundingClientRect();
                 const yInBar = t.clientY - rect.top;
                 const edgeThresh = Math.min(EDGE_MAX_PX, rect.height * EDGE_FRAC);
-                const nearTop = !continuesAbove && yInBar < edgeThresh;
-                const nearBottom = !continuesBelow && yInBar > rect.height - edgeThresh;
+                // Resize edges sit at the *declared* boundaries, not the extension
+                // boundaries — user expects to drag the solid rectangle's edge.
+                const decTopInBar = decTopAbs !== null ? decTopAbs - top : null;
+                const decBottomInBar = decBottomAbs !== null ? decBottomAbs - top : null;
+                const nearTop = declaredInWeek && !decContinuesAbove && decTopInBar !== null &&
+                  Math.abs(yInBar - decTopInBar) < edgeThresh;
+                const nearBottom = declaredInWeek && !decContinuesBelow && decBottomInBar !== null &&
+                  Math.abs(yInBar - decBottomInBar) < edgeThresh;
                 const dayAtStart = (() => {
                   const el = document.elementFromPoint(t.clientX, t.clientY) as HTMLElement | null;
                   const dayEl = el?.closest('[data-day]') as HTMLElement | null;
-                  return dayEl?.dataset.day || barStartDate;
+                  return dayEl?.dataset.day || extBarStart;
                 })();
                 const origin = { x: t.clientX, y: t.clientY };
                 let resolved = false;
@@ -956,6 +1004,27 @@ function PortraitWeek(p: WeekProps) {
                 window.addEventListener('touchend', onEnd);
               }}
             >
+              {/* Solid inner rectangle marking the *declared* experiment bounds. Only
+                  rendered when the outer bar has extension past declared; otherwise
+                  the outer bar itself shows the declared bounds. */}
+              {hasExtension && declaredInWeek && decTopAbs !== null && decBottomAbs !== null && (
+                <div
+                  className="absolute left-0 right-0 pointer-events-none"
+                  style={{
+                    top: decTopAbs - top,
+                    height: decBottomAbs - decTopAbs,
+                    backgroundColor: pop.color + '18',
+                    border: `2px solid ${pop.color}80`,
+                    borderTopWidth: decContinuesAbove ? 0 : 2,
+                    borderBottomWidth: decContinuesBelow ? 0 : 2,
+                    borderTopLeftRadius: decContinuesAbove ? 0 : 10,
+                    borderTopRightRadius: decContinuesAbove ? 0 : 10,
+                    borderBottomLeftRadius: decContinuesBelow ? 0 : 10,
+                    borderBottomRightRadius: decContinuesBelow ? 0 : 10,
+                  }}
+                />
+              )}
+
               <div className="absolute inset-0 flex flex-col items-stretch px-1 py-1.5 pointer-events-none overflow-hidden">
                 <span
                   className="text-[11px] font-bold leading-tight break-words text-center"
@@ -981,11 +1050,11 @@ function PortraitWeek(p: WeekProps) {
                 const aec = p.activeEventCreate!;
                 const lo = aec.startDate < aec.endDate ? aec.startDate : aec.endDate;
                 const hi = aec.startDate < aec.endDate ? aec.endDate : aec.startDate;
-                const cLo = lo < barStartDate ? barStartDate : lo;
-                const cHi = hi > barEndDate ? barEndDate : hi;
-                const topDays = daysBetween(barStartDate, cLo);
-                const botDays = daysBetween(barStartDate, cHi) + 1;
-                const span = daysBetween(barStartDate, barEndDate) + 1;
+                const cLo = lo < extBarStart ? extBarStart : lo;
+                const cHi = hi > extBarEnd ? extBarEnd : hi;
+                const topDays = daysBetween(extBarStart, cLo);
+                const botDays = daysBetween(extBarStart, cHi) + 1;
+                const span = daysBetween(extBarStart, extBarEnd) + 1;
                 const topPct = (topDays / span) * 100;
                 const hPct = ((botDays - topDays) / span) * 100;
                 return (
@@ -996,13 +1065,14 @@ function PortraitWeek(p: WeekProps) {
                 );
               })()}
 
-              {/* Sub-events as horizontal bands within the vertical bar */}
+              {/* Sub-events as horizontal bands within the vertical bar — positioned
+                  across the *extended* range so outside events stay visible. */}
               {barEvents.map(ev => {
-                const evStart = ev.startDate < barStartDate ? barStartDate : ev.startDate;
-                const evEnd = ev.endDate > barEndDate ? barEndDate : ev.endDate;
-                const evTopDays = daysBetween(barStartDate, evStart);
-                const evBottomDays = daysBetween(barStartDate, evEnd) + 1;
-                const barSpanDays = daysBetween(barStartDate, barEndDate) + 1;
+                const evStart = ev.startDate < extBarStart ? extBarStart : ev.startDate;
+                const evEnd = ev.endDate > extBarEnd ? extBarEnd : ev.endDate;
+                const evTopDays = daysBetween(extBarStart, evStart);
+                const evBottomDays = daysBetween(extBarStart, evEnd) + 1;
+                const barSpanDays = daysBetween(extBarStart, extBarEnd) + 1;
                 const evTopPct = (evTopDays / barSpanDays) * 100;
                 const evHPct = ((evBottomDays - evTopDays) / barSpanDays) * 100;
                 const isEvSel = p.selectedEventId === ev.id;
@@ -1088,15 +1158,17 @@ function PortraitWeek(p: WeekProps) {
 function LandscapeWeek(p: WeekProps) {
   const weekStart = toDateStr(p.week[0]);
   const weekEnd = toDateStr(p.week[6]);
-  const visible = p.populations.filter(pop => rangesOverlap(pop.startDate, pop.endDate, weekStart, weekEnd));
+  const visible = p.populations
+    .map(pop => ({ pop, ...computePopExt(pop, p.events) }))
+    .filter(({ extStart, extEnd }) => rangesOverlap(extStart, extEnd, weekStart, weekEnd));
 
   const slots = useMemo(() => {
     const result: Record<string, number> = {};
-    const sorted = [...visible].sort((a, b) => a.startDate.localeCompare(b.startDate));
+    const sorted = [...visible].sort((a, b) => a.extStart.localeCompare(b.extStart));
     const occupied: { slot: number; start: string; end: string }[] = [];
-    for (const pop of sorted) {
-      const sDate = pop.startDate > weekStart ? pop.startDate : weekStart;
-      const eDate = pop.endDate < weekEnd ? pop.endDate : weekEnd;
+    for (const { pop, extStart, extEnd } of sorted) {
+      const sDate = extStart > weekStart ? extStart : weekStart;
+      const eDate = extEnd < weekEnd ? extEnd : weekEnd;
       let slot = 0;
       while (occupied.some(o => o.slot === slot && !(sDate > o.end || eDate < o.start))) slot++;
       occupied.push({ slot, start: sDate, end: eDate });
@@ -1152,19 +1224,38 @@ function LandscapeWeek(p: WeekProps) {
           })}
         </div>
 
-        {visible.map(pop => {
+        {visible.map(({ pop, extStart, extEnd }) => {
           const slot = slots[pop.id];
-          const sColDay = pop.startDate > weekStart ? pop.startDate : weekStart;
-          const eColDay = pop.endDate < weekEnd ? pop.endDate : weekEnd;
-          const startCol = daysBetween(weekStart, sColDay);
-          const endCol = daysBetween(weekStart, eColDay);
-          const leftPct = (startCol / 7) * 100;
-          const widthPct = ((endCol - startCol + 1) / 7) * 100;
+          const hasExtension = extStart < pop.startDate || extEnd > pop.endDate;
+
+          const extBarStart = extStart > weekStart ? extStart : weekStart;
+          const extBarEnd = extEnd < weekEnd ? extEnd : weekEnd;
+          const extStartCol = daysBetween(weekStart, extBarStart);
+          const extEndCol = daysBetween(weekStart, extBarEnd);
+          const extLeftPct = (extStartCol / 7) * 100;
+          const extWidthPct = ((extEndCol - extStartCol + 1) / 7) * 100;
+
+          const declaredInWeek = rangesOverlap(pop.startDate, pop.endDate, weekStart, weekEnd);
+          const decStartInWeek = pop.startDate > weekStart ? pop.startDate : weekStart;
+          const decEndInWeek = pop.endDate < weekEnd ? pop.endDate : weekEnd;
+          const decStartCol = daysBetween(weekStart, decStartInWeek);
+          const decEndCol = daysBetween(weekStart, decEndInWeek);
+          // Declared position inside the outer (ext) bar, expressed as percentages.
+          const extSpanDays = extEndCol - extStartCol + 1;
+          const decLeftPctInBar = declaredInWeek ? ((decStartCol - extStartCol) / extSpanDays) * 100 : 0;
+          const decWidthPctInBar = declaredInWeek ? ((decEndCol - decStartCol + 1) / extSpanDays) * 100 : 0;
+          const decContinuesLeft = pop.startDate < weekStart;
+          const decContinuesRight = pop.endDate > weekEnd;
+
           const isSelected = p.selectedPopId === pop.id && !p.selectedEventId;
           const barEvents = p.events.filter(ev =>
             ev.populationId === pop.id &&
-            rangesOverlap(ev.startDate, ev.endDate, sColDay, eColDay)
+            rangesOverlap(ev.startDate, ev.endDate, extBarStart, extBarEnd)
           );
+
+          const outerBg = hasExtension ? pop.color + '0a' : pop.color + '18';
+          const outerBorderColor = hasExtension ? pop.color + '55' : pop.color + '80';
+          const outerBorderStyle = hasExtension ? 'dashed' : 'solid';
 
           return (
             <div
@@ -1174,11 +1265,11 @@ function LandscapeWeek(p: WeekProps) {
               className={`absolute rounded-lg overflow-visible ${isSelected ? 'ring-2 ring-offset-2 ring-indigo-500' : ''}`}
               style={{
                 top: `calc(${slot * laneHPct}% + 2px)`,
-                left: `calc(${leftPct}% + 2px)`,
-                width: `calc(${widthPct}% - 4px)`,
+                left: `calc(${extLeftPct}% + 2px)`,
+                width: `calc(${extWidthPct}% - 4px)`,
                 height: `calc(${laneHPct}% - 4px)`,
-                backgroundColor: pop.color + '18',
-                border: `2px solid ${pop.color}80`,
+                backgroundColor: outerBg,
+                border: `2px ${outerBorderStyle} ${outerBorderColor}`,
                 touchAction: 'none',
               }}
               onTouchStart={(e) => {
@@ -1189,14 +1280,15 @@ function LandscapeWeek(p: WeekProps) {
                 const rect = barEl.getBoundingClientRect();
                 const xIn = t.clientX - rect.left;
                 const edgeThresh = Math.min(EDGE_MAX_PX, rect.width * EDGE_FRAC);
-                const barStartsInWeek = pop.startDate >= weekStart;
-                const barEndsInWeek = pop.endDate <= weekEnd;
-                const nearLeft = barStartsInWeek && xIn < edgeThresh;
-                const nearRight = barEndsInWeek && xIn > rect.width - edgeThresh;
+                // Edges at *declared* boundaries within the outer (ext) bar.
+                const decLeftPx = (decLeftPctInBar / 100) * rect.width;
+                const decRightPx = ((decLeftPctInBar + decWidthPctInBar) / 100) * rect.width;
+                const nearLeft = declaredInWeek && !decContinuesLeft && Math.abs(xIn - decLeftPx) < edgeThresh;
+                const nearRight = declaredInWeek && !decContinuesRight && Math.abs(xIn - decRightPx) < edgeThresh;
                 const dayAtStart = (() => {
                   const el = document.elementFromPoint(t.clientX, t.clientY) as HTMLElement | null;
                   const dayEl = el?.closest('[data-day]') as HTMLElement | null;
-                  return dayEl?.dataset.day || sColDay;
+                  return dayEl?.dataset.day || extBarStart;
                 })();
                 const origin = { x: t.clientX, y: t.clientY };
                 let resolved = false;
@@ -1240,6 +1332,27 @@ function LandscapeWeek(p: WeekProps) {
                 window.addEventListener('touchend', onEnd);
               }}
             >
+              {/* Declared inner rectangle inside the outer extended bar. */}
+              {hasExtension && declaredInWeek && (
+                <div
+                  className="absolute pointer-events-none"
+                  style={{
+                    top: 0,
+                    bottom: 0,
+                    left: `${decLeftPctInBar}%`,
+                    width: `${decWidthPctInBar}%`,
+                    backgroundColor: pop.color + '18',
+                    border: `2px solid ${pop.color}80`,
+                    borderLeftWidth: decContinuesLeft ? 0 : 2,
+                    borderRightWidth: decContinuesRight ? 0 : 2,
+                    borderTopLeftRadius: decContinuesLeft ? 0 : 8,
+                    borderBottomLeftRadius: decContinuesLeft ? 0 : 8,
+                    borderTopRightRadius: decContinuesRight ? 0 : 8,
+                    borderBottomRightRadius: decContinuesRight ? 0 : 8,
+                  }}
+                />
+              )}
+
               <div className="flex flex-col justify-center h-full px-2 pointer-events-none overflow-hidden">
                 <span className="text-[11px] font-bold truncate leading-tight" style={{ color: pop.color }}>
                   {platesLabel(pop.plateType, pop.plateCount)}
@@ -1254,11 +1367,11 @@ function LandscapeWeek(p: WeekProps) {
                 const aec = p.activeEventCreate!;
                 const lo = aec.startDate < aec.endDate ? aec.startDate : aec.endDate;
                 const hi = aec.startDate < aec.endDate ? aec.endDate : aec.startDate;
-                const cLo = lo < sColDay ? sColDay : lo;
-                const cHi = hi > eColDay ? eColDay : hi;
-                const span = daysBetween(sColDay, eColDay) + 1;
-                const leftDays = daysBetween(sColDay, cLo);
-                const rightDays = daysBetween(sColDay, cHi) + 1;
+                const cLo = lo < extBarStart ? extBarStart : lo;
+                const cHi = hi > extBarEnd ? extBarEnd : hi;
+                const span = daysBetween(extBarStart, extBarEnd) + 1;
+                const leftDays = daysBetween(extBarStart, cLo);
+                const rightDays = daysBetween(extBarStart, cHi) + 1;
                 const leftP = (leftDays / span) * 100;
                 const wP = ((rightDays - leftDays) / span) * 100;
                 return (
@@ -1270,11 +1383,11 @@ function LandscapeWeek(p: WeekProps) {
               })()}
 
               {barEvents.map(ev => {
-                const evStart = ev.startDate < sColDay ? sColDay : ev.startDate;
-                const evEnd = ev.endDate > eColDay ? eColDay : ev.endDate;
-                const barSpan = daysBetween(sColDay, eColDay) + 1;
-                const evLeftDays = daysBetween(sColDay, evStart);
-                const evRightDays = daysBetween(sColDay, evEnd) + 1;
+                const evStart = ev.startDate < extBarStart ? extBarStart : ev.startDate;
+                const evEnd = ev.endDate > extBarEnd ? extBarEnd : ev.endDate;
+                const barSpan = daysBetween(extBarStart, extBarEnd) + 1;
+                const evLeftDays = daysBetween(extBarStart, evStart);
+                const evRightDays = daysBetween(extBarStart, evEnd) + 1;
                 const evLeft = (evLeftDays / barSpan) * 100;
                 const evW = ((evRightDays - evLeftDays) / barSpan) * 100;
                 const isEvSel = p.selectedEventId === ev.id;
