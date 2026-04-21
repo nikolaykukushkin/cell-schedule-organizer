@@ -129,6 +129,11 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
 
   const [selectedPopId, setSelectedPopId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  // Panel visibility split from selection: one click highlights, a second quick
+  // click on the same item opens the parameters panel — same model as mobile.
+  const [panelVisible, setPanelVisible] = useState(false);
+  const DOUBLE_CLICK_MS = 400;
+  const lastClickRef = useRef<{ kind: 'pop' | 'event'; id: string; time: number } | null>(null);
 
   // Mobile detection + orientation
   const [isMobile, setIsMobile] = useState(false);
@@ -213,10 +218,20 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const gridStart = toDateStr(gridDates[0]);
   const gridEnd = toDateStr(gridDates[gridDates.length - 1]);
 
-  const visiblePops = useMemo(
-    () => populations.filter(p => rangesOverlap(p.startDate, p.endDate, gridStart, gridEnd)),
-    [populations, gridStart, gridEnd]
-  );
+  const visiblePops = useMemo(() => {
+    // A pop is visible if its *extended* range (declared + any outside events)
+    // overlaps the month grid.
+    return populations.filter(p => {
+      let extStart = p.startDate;
+      let extEnd = p.endDate;
+      for (const ev of events) {
+        if (ev.populationId !== p.id) continue;
+        if (ev.startDate < extStart) extStart = ev.startDate;
+        if (ev.endDate > extEnd) extEnd = ev.endDate;
+      }
+      return rangesOverlap(extStart, extEnd, gridStart, gridEnd);
+    });
+  }, [populations, events, gridStart, gridEnd]);
 
   // Nav
   const goPrev = () => { if (month === 0) { setMonth(11); setYear(y => y - 1); } else setMonth(m => m - 1); };
@@ -529,19 +544,42 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     }
   }, [dragStart, dragEnd, cancelLongPress]);
 
-  // For click-without-move on bar: select population (handled separately since dragTargetId is cleared)
+  // Click on bar without drag: first click highlights, second click within
+  // DOUBLE_CLICK_MS on the same bar opens the parameters panel.
   const handleBarClick = useCallback((popId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if ((e.target as HTMLElement).closest('[data-event-box]')) return;
-    setSelectedPopId(popId);
-    setSelectedEventId(null);
-  }, []);
+    const now = Date.now();
+    const prev = lastClickRef.current;
+    const alreadyHighlighted = selectedPopId === popId && !selectedEventId;
+    const isDoubleClick = alreadyHighlighted
+      && prev?.kind === 'pop' && prev.id === popId && now - prev.time < DOUBLE_CLICK_MS;
+    if (isDoubleClick) {
+      setPanelVisible(true);
+    } else {
+      setSelectedPopId(popId);
+      setSelectedEventId(null);
+      setPanelVisible(false);
+    }
+    lastClickRef.current = { kind: 'pop', id: popId, time: now };
+  }, [selectedPopId, selectedEventId]);
 
   const handleEventClick = useCallback((eventId: string, popId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setSelectedEventId(eventId);
-    setSelectedPopId(popId);
-  }, []);
+    const now = Date.now();
+    const prev = lastClickRef.current;
+    const alreadyHighlighted = selectedEventId === eventId;
+    const isDoubleClick = alreadyHighlighted
+      && prev?.kind === 'event' && prev.id === eventId && now - prev.time < DOUBLE_CLICK_MS;
+    if (isDoubleClick) {
+      setPanelVisible(true);
+    } else {
+      setSelectedEventId(eventId);
+      setSelectedPopId(popId);
+      setPanelVisible(false);
+    }
+    lastClickRef.current = { kind: 'event', id: eventId, time: now };
+  }, [selectedEventId]);
 
   // --- Keyboard: Delete key ---
   useEffect(() => {
@@ -652,19 +690,97 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
 
   // Bar layout
   const barLayout = useMemo(() => {
-    const allBars: { pop: CellPopulation; weekIdx: number; startFrac: number; endFrac: number; slot: number }[] = [];
+    // Per-pop extension bounds — widen declared range to include any events that
+    // fell outside it (e.g. a coating event left before a shrunk experiment).
+    const popExt = new Map<string, { extStart: string; extEnd: string }>();
+    for (const pop of visiblePops) {
+      let extStart = pop.startDate;
+      let extEnd = pop.endDate;
+      for (const ev of events) {
+        if (ev.populationId !== pop.id) continue;
+        if (ev.startDate < extStart) extStart = ev.startDate;
+        if (ev.endDate > extEnd) extEnd = ev.endDate;
+      }
+      popExt.set(pop.id, { extStart, extEnd });
+    }
+
+    type Bar = {
+      pop: CellPopulation;
+      weekIdx: number;
+      // Outer (extended) horizontal fraction within the week
+      startFrac: number;
+      endFrac: number;
+      // Outer ext range clipped to this week, as date strings (for event filtering).
+      extStartDate: string;
+      extEndDate: string;
+      // Declared fractions — null when the declared range is entirely in another week
+      decStartFrac: number | null;
+      decEndFrac: number | null;
+      // Are the extended edges the pop's actual extended start/end (rather than a
+      // week-clip)? Used for corner rounding.
+      extIsBarStart: boolean;
+      extIsBarEnd: boolean;
+      // Do the declared start/end coincide with the ext start/end?
+      hasExtensionBefore: boolean;
+      hasExtensionAfter: boolean;
+      slot: number;
+    };
+    const allBars: Bar[] = [];
     visiblePops.forEach(pop => {
+      const ext = popExt.get(pop.id)!;
+      const hasExtBefore = ext.extStart < pop.startDate;
+      const hasExtAfter = ext.extEnd > pop.endDate;
       weeks.forEach((week, weekIdx) => {
         const weekStart = toDateStr(week[0]);
         const weekEnd = toDateStr(week[6]);
-        if (!rangesOverlap(pop.startDate, pop.endDate, weekStart, weekEnd)) return;
-        const isBarStart = pop.startDate >= weekStart;
-        const isBarEnd = pop.endDate <= weekEnd;
+        if (!rangesOverlap(ext.extStart, ext.extEnd, weekStart, weekEnd)) return;
+
+        // Ext fractions (outer bar span in this week)
+        const extIsBarStart = ext.extStart >= weekStart;
+        const extIsBarEnd = ext.extEnd <= weekEnd;
         let startFrac = 0;
-        if (isBarStart) { const col = week.findIndex(d => toDateStr(d) === pop.startDate); startFrac = (col >= 0 ? col : 0) + pop.startHour / 24; }
+        if (extIsBarStart) {
+          const col = week.findIndex(d => toDateStr(d) === ext.extStart);
+          // Ext range is day-aligned (events use startHour separately); treat start hour as 0
+          startFrac = (col >= 0 ? col : 0);
+          // If the ext start coincides with the pop's declared start, respect startHour
+          if (ext.extStart === pop.startDate) startFrac += pop.startHour / 24;
+        }
         let endFrac = 7;
-        if (isBarEnd) { const col = week.findIndex(d => toDateStr(d) === pop.endDate); endFrac = (col >= 0 ? col : 6) + (pop.endHour + 1) / 24; }
-        allBars.push({ pop, weekIdx, startFrac, endFrac, slot: 0 });
+        if (extIsBarEnd) {
+          const col = week.findIndex(d => toDateStr(d) === ext.extEnd);
+          endFrac = (col >= 0 ? col : 6) + 1;
+          if (ext.extEnd === pop.endDate) endFrac = (col >= 0 ? col : 6) + (pop.endHour + 1) / 24;
+        }
+
+        // Declared fractions (inner marker position) — only if declared overlaps this week.
+        let decStartFrac: number | null = null;
+        let decEndFrac: number | null = null;
+        if (rangesOverlap(pop.startDate, pop.endDate, weekStart, weekEnd)) {
+          const isDecStart = pop.startDate >= weekStart;
+          const isDecEnd = pop.endDate <= weekEnd;
+          decStartFrac = 0;
+          if (isDecStart) {
+            const col = week.findIndex(d => toDateStr(d) === pop.startDate);
+            decStartFrac = (col >= 0 ? col : 0) + pop.startHour / 24;
+          }
+          decEndFrac = 7;
+          if (isDecEnd) {
+            const col = week.findIndex(d => toDateStr(d) === pop.endDate);
+            decEndFrac = (col >= 0 ? col : 6) + (pop.endHour + 1) / 24;
+          }
+        }
+
+        const extStartDate = ext.extStart > weekStart ? ext.extStart : weekStart;
+        const extEndDate = ext.extEnd < weekEnd ? ext.extEnd : weekEnd;
+        allBars.push({
+          pop, weekIdx, startFrac, endFrac,
+          extStartDate, extEndDate,
+          decStartFrac, decEndFrac,
+          extIsBarStart, extIsBarEnd,
+          hasExtensionBefore: hasExtBefore, hasExtensionAfter: hasExtAfter,
+          slot: 0,
+        });
       });
     });
 
@@ -796,10 +912,9 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const BAR_V_OFFSET = 34;
   const MIN_BAR_HEIGHT = 14;
   const MIN_WEEK_HEIGHT = isMobile ? 60 : 110;
-  // Let each week row grow freely up to 4× its baseline — that's enough to fit ~6
-  // full-height bars before compression kicks in. Most weeks have 1-3 experiments
-  // in parallel, so compression only triggers in unusually dense views.
-  const MAX_WEEK_HEIGHT = Math.round(MIN_WEEK_HEIGHT * 4);
+  // Let the week row grow naturally to fit up to 4 full-height bars
+  // (34 + 4*(56+4) = 274 px); beyond that, bars compress instead of growing the row.
+  const MAX_WEEK_HEIGHT = BAR_V_OFFSET + 4 * (BAR_HEIGHT + BAR_GAP);
 
   if (isMobile) {
     return <MobileWeekView experimentId={experimentId} orientation={isLandscape ? 'landscape' : 'portrait'} syncStatus={syncStatus} />;
@@ -887,17 +1002,32 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
                     const isSelected = bar.pop.id === selectedPopId && !selectedEventId;
                     const weekStart = toDateStr(week[0]);
                     const weekEnd = toDateStr(week[6]);
-                    const isBarStart = bar.pop.startDate >= weekStart;
-                    const isBarEnd = bar.pop.endDate <= weekEnd;
+                    // Outer (ext) bar geometry
                     const leftPct = (bar.startFrac / 7) * 100;
                     const widthPct = ((bar.endFrac - bar.startFrac) / 7) * 100;
+                    // Declared inner marker geometry — only meaningful when the pop's
+                    // declared range overlaps this week.
+                    const declaredInWeek = bar.decStartFrac !== null && bar.decEndFrac !== null;
+                    const decLeftInBar = declaredInWeek
+                      ? ((bar.decStartFrac! - bar.startFrac) / (bar.endFrac - bar.startFrac)) * 100
+                      : 0;
+                    const decWidthInBar = declaredInWeek
+                      ? ((bar.decEndFrac! - bar.decStartFrac!) / (bar.endFrac - bar.startFrac)) * 100
+                      : 0;
+                    const decContinuesLeft = bar.pop.startDate < weekStart;
+                    const decContinuesRight = bar.pop.endDate > weekEnd;
+                    const hasExt = bar.hasExtensionBefore || bar.hasExtensionAfter;
 
+                    // Event filter: include every event that overlaps the ext range.
                     const barEvents = events.filter(ev =>
                       ev.populationId === bar.pop.id &&
-                      rangesOverlap(ev.startDate, ev.endDate,
-                        bar.pop.startDate > weekStart ? bar.pop.startDate : weekStart,
-                        bar.pop.endDate < weekEnd ? bar.pop.endDate : weekEnd)
+                      rangesOverlap(ev.startDate, ev.endDate, bar.extStartDate, bar.extEndDate)
                     );
+
+                    // Outer bar styling: faded + dashed border when extension exists.
+                    const outerBg = hasExt ? bar.pop.color + '08' : bar.pop.color + '12';
+                    const outerBorderColor = hasExt ? bar.pop.color + '55' : bar.pop.color + '80';
+                    const outerBorderStyle = hasExt ? 'dashed' : 'solid';
 
                     return (
                       <div
@@ -907,21 +1037,38 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
                         className={`
                           absolute cursor-grab active:cursor-grabbing overflow-visible z-10
                           ${isSelected ? 'ring-2 ring-offset-2 ring-indigo-500 shadow-lg' : ''}
-                          ${isBarStart ? 'rounded-l-xl' : ''} ${isBarEnd ? 'rounded-r-xl' : ''}
+                          ${bar.extIsBarStart ? 'rounded-l-xl' : ''} ${bar.extIsBarEnd ? 'rounded-r-xl' : ''}
                         `}
                         style={{
                           top: BAR_V_OFFSET + bar.slot * (barHeight + BAR_GAP),
                           left: `calc(${leftPct}% + 2px)`,
                           width: `calc(${widthPct}% - 4px)`,
                           height: barHeight,
-                          backgroundColor: bar.pop.color + '12',
-                          border: `2px solid ${bar.pop.color}80`,
-                          borderLeftStyle: isBarStart ? 'solid' : 'none',
-                          borderRightStyle: isBarEnd ? 'solid' : 'none',
+                          backgroundColor: outerBg,
+                          border: `2px ${outerBorderStyle} ${outerBorderColor}`,
+                          borderLeftStyle: bar.extIsBarStart ? outerBorderStyle : 'none',
+                          borderRightStyle: bar.extIsBarEnd ? outerBorderStyle : 'none',
                         }}
-                        onMouseDown={(e) => handleBarMouseDown(bar.pop.id, e)}
+                        onMouseDown={(e) => {
+                          // Edge-aware: highlighted bar + click near the declared edge
+                          // triggers a resize; otherwise fall through to move-prep.
+                          if ((e.target as HTMLElement).closest('[data-event-box]')) return;
+                          const isHighlighted = selectedPopId === bar.pop.id && !selectedEventId;
+                          if (isHighlighted && declaredInWeek) {
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            const xInBar = e.clientX - rect.left;
+                            const edgeThresh = Math.min(15, rect.width * 0.15);
+                            const decLeftPx = (decLeftInBar / 100) * rect.width;
+                            const decRightPx = ((decLeftInBar + decWidthInBar) / 100) * rect.width;
+                            const nearLeft = !decContinuesLeft && Math.abs(xInBar - decLeftPx) < edgeThresh;
+                            const nearRight = !decContinuesRight && Math.abs(xInBar - decRightPx) < edgeThresh;
+                            if (nearLeft) { handleResizePopStart(bar.pop.id, e); return; }
+                            if (nearRight) { handleResizePopEnd(bar.pop.id, e); return; }
+                          }
+                          handleBarMouseDown(bar.pop.id, e);
+                        }}
                         onTouchStart={(e) => {
-                          if ((e.target as HTMLElement).closest('[data-event-box]') || (e.target as HTMLElement).closest('[data-resize]')) return;
+                          if ((e.target as HTMLElement).closest('[data-event-box]')) return;
                           const t = e.touches[0];
                           const dh = getDateHourFromGlobalMouse({ clientX: t.clientX, clientY: t.clientY } as MouseEvent);
                           if (!dh) return;
@@ -942,8 +1089,36 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
                         }}
                         onClick={(e) => handleBarClick(bar.pop.id, e)}
                       >
-                        {isBarStart && (
-                          <div className="flex flex-col justify-center px-3 max-md:px-1.5 h-full pointer-events-none overflow-hidden">
+                        {/* Declared inner rectangle — shows the experiment's actual
+                            bounds when the outer bar is extended past them. */}
+                        {hasExt && declaredInWeek && (
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              top: 0,
+                              bottom: 0,
+                              left: `${decLeftInBar}%`,
+                              width: `${decWidthInBar}%`,
+                              backgroundColor: bar.pop.color + '12',
+                              border: `2px solid ${bar.pop.color}80`,
+                              borderLeftStyle: decContinuesLeft ? 'none' : 'solid',
+                              borderRightStyle: decContinuesRight ? 'none' : 'solid',
+                              borderTopLeftRadius: decContinuesLeft ? 0 : 8,
+                              borderBottomLeftRadius: decContinuesLeft ? 0 : 8,
+                              borderTopRightRadius: decContinuesRight ? 0 : 8,
+                              borderBottomRightRadius: decContinuesRight ? 0 : 8,
+                            }}
+                          />
+                        )}
+
+                        {declaredInWeek && !decContinuesLeft && (
+                          <div
+                            className="absolute top-0 bottom-0 flex flex-col justify-center px-3 max-md:px-1.5 pointer-events-none overflow-hidden"
+                            style={{
+                              left: `${decLeftInBar}%`,
+                              width: `${decWidthInBar}%`,
+                            }}
+                          >
                             <span className="text-[14px] max-md:text-[11px] font-bold truncate leading-tight" style={{ color: bar.pop.color }}>
                               {platesLabel(bar.pop.plateType, bar.pop.plateCount)}
                             </span>
@@ -954,28 +1129,18 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
                           </div>
                         )}
 
-                        {isBarStart && (
-                          <div data-resize className="absolute left-0 top-0 bottom-0 w-3 cursor-col-resize hover:bg-black/10 rounded-l-xl"
-                            onMouseDown={(e) => handleResizePopStart(bar.pop.id, e)} />
-                        )}
-                        {isBarEnd && (
-                          <div data-resize className="absolute right-0 top-0 bottom-0 w-3 cursor-col-resize hover:bg-black/10 rounded-r-xl"
-                            onMouseDown={(e) => handleResizePopEnd(bar.pop.id, e)} />
-                        )}
-
                         {barEvents.map(ev => {
-                          const bsd = bar.pop.startDate > weekStart ? bar.pop.startDate : weekStart;
-                          const bed = bar.pop.endDate < weekEnd ? bar.pop.endDate : weekEnd;
-                          const bsHour = bar.pop.startDate >= weekStart ? bar.pop.startHour : 0;
-                          const beHour = bar.pop.endDate <= weekEnd ? bar.pop.endHour : 23;
-                          const evStartDate = ev.startDate < bsd ? bsd : ev.startDate;
-                          const evEndDate = ev.endDate > bed ? bed : ev.endDate;
-                          const evStartHour = ev.startDate < bsd ? 0 : ev.startHour;
-                          const evEndHour = ev.endDate > bed ? 23 : ev.endHour;
-                          const barStartAbs = bsHour / 24;
-                          const barEndAbs = daysBetween(bsd, bed) + (beHour + 1) / 24;
-                          const evStartAbs = daysBetween(bsd, evStartDate) + evStartHour / 24;
-                          const evEndAbs = daysBetween(bsd, evEndDate) + (evEndHour + 1) / 24;
+                          // Position event relative to the outer (ext) bar range.
+                          const extStartHour = (bar.extIsBarStart && bar.extStartDate === bar.pop.startDate) ? bar.pop.startHour : 0;
+                          const extEndHour = (bar.extIsBarEnd && bar.extEndDate === bar.pop.endDate) ? bar.pop.endHour : 23;
+                          const evStartDate = ev.startDate < bar.extStartDate ? bar.extStartDate : ev.startDate;
+                          const evEndDate = ev.endDate > bar.extEndDate ? bar.extEndDate : ev.endDate;
+                          const evStartHour = ev.startDate < bar.extStartDate ? 0 : ev.startHour;
+                          const evEndHour = ev.endDate > bar.extEndDate ? 23 : ev.endHour;
+                          const barStartAbs = extStartHour / 24;
+                          const barEndAbs = daysBetween(bar.extStartDate, bar.extEndDate) + (extEndHour + 1) / 24;
+                          const evStartAbs = daysBetween(bar.extStartDate, evStartDate) + evStartHour / 24;
+                          const evEndAbs = daysBetween(bar.extStartDate, evEndDate) + (evEndHour + 1) / 24;
                           const barRange = barEndAbs - barStartAbs;
                           const evLeftPct = barRange > 0 ? ((evStartAbs - barStartAbs) / barRange) * 100 : 0;
                           const evWidthPct = barRange > 0 ? ((evEndAbs - evStartAbs) / barRange) * 100 : 100;
@@ -1012,7 +1177,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         </div>
 
         {/* Panel: floating on desktop, inline below calendar on mobile */}
-        {(selectedEvent || (selectedPop && !selectedEvent)) && (
+        {panelVisible && (selectedEvent || (selectedPop && !selectedEvent)) && (
           <EventPanel
             subEvent={selectedEvent}
             population={selectedPop}
@@ -1022,7 +1187,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
             onUpdatePopulation={handleUpdatePopulation}
             onDeletePopulation={handleDeletePopulation}
             onRepeatNextWeek={handleRepeatNextWeek}
-            onClose={() => { setSelectedEventId(null); if (!selectedEvent) setSelectedPopId(null); }}
+            onClose={() => { setPanelVisible(false); }}
             isMobile={isMobile}
           />
         )}
