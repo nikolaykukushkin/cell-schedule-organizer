@@ -22,6 +22,11 @@ import MobileWeekView from './MobileWeekView';
 const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const LONG_PRESS_MS = 500;
 
+// Per-experiment memo: remembers each population's slot (lane) so dragging horizontally
+// doesn't shuffle bars up/down. Lives at module scope so it persists across re-renders
+// without a useRef (whose mutation during render trips react-hooks/immutability).
+const slotMemoByExperiment = new Map<string, Map<string, number>>();
+
 /** Total hours an event spans. Used to pick abbreviated label for small events. */
 function eventDurationHours(ev: SubEvent): number {
   const [sy, sm, sd] = ev.startDate.split('-').map(Number);
@@ -662,33 +667,59 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         allBars.push({ pop, weekIdx, startFrac, endFrac, slot: 0 });
       });
     });
-    // Assign each population a stable global slot so it keeps the same lane across weeks.
-    // Process populations sorted by start date so earlier ones claim lower slots first.
-    const sortedPops = [...visiblePops].sort((a, b) => a.startDate.localeCompare(b.startDate) || a.startHour - b.startHour);
-    const popSlot = new Map<string, number>();
-    for (const pop of sortedPops) {
-      const popBars = allBars.filter(b => b.pop.id === pop.id);
-      let slot = 0;
-      // Find the lowest slot that doesn't conflict in ANY week this population appears in
-      outer: while (true) {
-        for (const pb of popBars) {
-          const conflicts = allBars.filter(b => b.pop.id !== pop.id && b.weekIdx === pb.weekIdx && popSlot.has(b.pop.id) && popSlot.get(b.pop.id) === slot);
-          if (conflicts.some(b => !(pb.startFrac >= b.endFrac || pb.endFrac <= b.startFrac))) {
-            slot++;
-            continue outer;
-          }
+
+    const memo = slotMemoByExperiment.get(experimentId) ?? new Map<string, number>();
+    const assignment = new Map<string, number>();
+    const slotConflicts = (popId: string, popBars: typeof allBars, slot: number) => {
+      for (const pb of popBars) {
+        for (const b of allBars) {
+          if (b.pop.id === popId) continue;
+          if (b.weekIdx !== pb.weekIdx) continue;
+          if (assignment.get(b.pop.id) !== slot) continue;
+          if (!(pb.startFrac >= b.endFrac || pb.endFrac <= b.startFrac)) return true;
         }
-        break;
       }
-      popSlot.set(pop.id, slot);
+      return false;
+    };
+
+    // Place pops with remembered slots first (lowest remembered slot wins ties) so they
+    // lock their lane; then place new pops by start date for a sensible default.
+    const memoized = visiblePops
+      .filter(p => memo.has(p.id))
+      .sort((a, b) => (memo.get(a.id)! - memo.get(b.id)!) || a.id.localeCompare(b.id));
+    const fresh = visiblePops
+      .filter(p => !memo.has(p.id))
+      .sort((a, b) => a.startDate.localeCompare(b.startDate) || a.id.localeCompare(b.id));
+
+    for (const pop of [...memoized, ...fresh]) {
+      const popBars = allBars.filter(b => b.pop.id === pop.id);
+      if (popBars.length === 0) continue;
+      const preferred = memo.get(pop.id);
+      let slot: number;
+      if (preferred !== undefined && !slotConflicts(pop.id, popBars, preferred)) {
+        slot = preferred;
+      } else {
+        slot = 0;
+        while (slotConflicts(pop.id, popBars, slot)) slot++;
+      }
+      assignment.set(pop.id, slot);
       for (const pb of popBars) pb.slot = slot;
     }
+
+    // Persist this render's assignments so the next render keeps lanes stable across
+    // date drags. Prune entries for populations that no longer exist.
+    const next = new Map(memo);
+    for (const [id, slot] of assignment) next.set(id, slot);
+    const liveIds = new Set(populations.map(p => p.id));
+    for (const id of Array.from(next.keys())) if (!liveIds.has(id)) next.delete(id);
+    slotMemoByExperiment.set(experimentId, next);
+
     const maxSlots = weeks.map((_, wi) => {
       const bars = allBars.filter(b => b.weekIdx === wi);
       return bars.length > 0 ? Math.max(...bars.map(b => b.slot)) + 1 : 0;
     });
     return { allBars, maxSlots };
-  }, [visiblePops, weeks]);
+  }, [visiblePops, weeks, populations, experimentId]);
 
   // Touch support: translate touch events to synthetic mouse-like coordinates
   useEffect(() => {
@@ -761,6 +792,13 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const selectedPop = populations.find(p => p.id === selectedPopId) || null;
   const todayStr = toDateStr(today);
   const BAR_HEIGHT = 56;
+  const BAR_GAP = 4;
+  const BAR_V_OFFSET = 34;
+  const MIN_BAR_HEIGHT = 14;
+  const MIN_WEEK_HEIGHT = isMobile ? 60 : 110;
+  // Allow each week row to grow up to 1.5× its baseline; past that, bars compress vertically
+  // so weeks stay readable without runaway growth.
+  const MAX_WEEK_HEIGHT = Math.round(MIN_WEEK_HEIGHT * 1.5);
 
   if (isMobile) {
     return <MobileWeekView experimentId={experimentId} orientation={isLandscape ? 'landscape' : 'portrait'} syncStatus={syncStatus} />;
@@ -789,14 +827,23 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           <div className="flex-1 flex flex-col">
             {weeks.map((week, wi) => {
               const slotsInWeek = barLayout.maxSlots[wi];
-              const barAreaHeight = slotsInWeek * (BAR_HEIGHT + 4);
+              const uncompressedHeight = BAR_V_OFFSET + slotsInWeek * (BAR_HEIGHT + BAR_GAP);
+              let weekMinHeight = Math.max(MIN_WEEK_HEIGHT, uncompressedHeight);
+              let barHeight = BAR_HEIGHT;
+              if (slotsInWeek > 0 && uncompressedHeight > MAX_WEEK_HEIGHT) {
+                weekMinHeight = MAX_WEEK_HEIGHT;
+                barHeight = Math.max(
+                  MIN_BAR_HEIGHT,
+                  Math.floor((MAX_WEEK_HEIGHT - BAR_V_OFFSET - slotsInWeek * BAR_GAP) / slotsInWeek),
+                );
+              }
               return (
                 <div
                   key={wi}
                   ref={el => { weekRowRefs.current[wi] = el; }}
                   data-week-row
                   className="relative flex-1 border-b border-slate-100 last:border-b-0"
-                  style={{ minHeight: isMobile ? Math.max(60, 24 + barAreaHeight) : Math.max(110, 36 + barAreaHeight) }}
+                  style={{ minHeight: weekMinHeight }}
                 >
                   <div className="grid grid-cols-7 absolute inset-0">
                     {week.map((date) => {
@@ -862,10 +909,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
                           ${isBarStart ? 'rounded-l-xl' : ''} ${isBarEnd ? 'rounded-r-xl' : ''}
                         `}
                         style={{
-                          top: 34 + bar.slot * (BAR_HEIGHT + 6),
+                          top: BAR_V_OFFSET + bar.slot * (barHeight + BAR_GAP),
                           left: `calc(${leftPct}% + 2px)`,
                           width: `calc(${widthPct}% - 4px)`,
-                          height: BAR_HEIGHT,
+                          height: barHeight,
                           backgroundColor: bar.pop.color + '12',
                           border: `2px solid ${bar.pop.color}80`,
                           borderLeftStyle: isBarStart ? 'solid' : 'none',

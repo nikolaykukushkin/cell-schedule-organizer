@@ -256,6 +256,28 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
   const todayStr = toDateStr(new Date());
   const dragRange = dragStart && dragEnd ? { start: dragStart < dragEnd ? dragStart : dragEnd, end: dragStart < dragEnd ? dragEnd : dragStart } : null;
 
+  // Global slot assignment — each population keeps the same column across every week
+  // it spans, so a multi-week experiment reads as one continuous strip instead of
+  // unrelated per-week bars. Portrait mode uses this; landscape keeps per-week slots.
+  const portraitSlots = useMemo(() => {
+    const sorted = [...populations].sort(
+      (a, b) => a.startDate.localeCompare(b.startDate) || a.id.localeCompare(b.id),
+    );
+    const occupied: { slot: number; start: string; end: string }[] = [];
+    const result: Record<string, number> = {};
+    for (const pop of sorted) {
+      let slot = 0;
+      while (occupied.some(o => o.slot === slot && !(pop.startDate > o.end || pop.endDate < o.start))) slot++;
+      occupied.push({ slot, start: pop.startDate, end: pop.endDate });
+      result[pop.id] = slot;
+    }
+    return result;
+  }, [populations]);
+  const portraitSlotCount = useMemo(() => {
+    const vals = Object.values(portraitSlots);
+    return vals.length > 0 ? Math.max(...vals) + 1 : 1;
+  }, [portraitSlots]);
+
   return (
     <div className="flex-1 flex flex-col h-full">
       <div className="border-b border-slate-200 bg-white flex items-center px-3 py-2 flex-shrink-0">
@@ -307,6 +329,8 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
                 onSelectPop={(id) => { setSelectedPopId(id); setSelectedEventId(null); }}
                 onSelectEvent={(id, popId) => { setSelectedEventId(id); setSelectedPopId(popId); }}
                 onCreateSubEvent={createEvent}
+                slots={portraitSlots}
+                slotCount={portraitSlotCount}
               />
             ) : (
               <LandscapeWeek
@@ -391,6 +415,8 @@ interface WeekProps {
   onSelectPop: (id: string) => void;
   onSelectEvent: (id: string, popId: string) => void;
   onCreateSubEvent?: (popId: string, date: string, startHour: number) => void;
+  slots?: Record<string, number>;
+  slotCount?: number;
 }
 
 function PortraitWeek(p: WeekProps) {
@@ -398,8 +424,8 @@ function PortraitWeek(p: WeekProps) {
   const weekEnd = toDateStr(p.week[6]);
   const visible = p.populations.filter(pop => rangesOverlap(pop.startDate, pop.endDate, weekStart, weekEnd));
 
-  // Slot assignment (column index for vertical bars)
-  const slots = useMemo(() => {
+  // Per-week fallback slot assignment (only used if caller didn't supply global slots).
+  const localSlots = useMemo(() => {
     const result: Record<string, number> = {};
     const sorted = [...visible].sort((a, b) => a.startDate.localeCompare(b.startDate));
     const occupied: { slot: number; start: string; end: string }[] = [];
@@ -414,9 +440,13 @@ function PortraitWeek(p: WeekProps) {
     return result;
   }, [visible, weekStart, weekEnd]);
 
+  // Caller-provided global slots (stable column across weeks) take precedence so
+  // multi-week experiments read as one continuous strip.
+  const slots = p.slots ?? localSlots;
+
   const totalHeight = 7 * DAY_ROW_H;
-  const maxSlot = Object.values(slots).length > 0 ? Math.max(...Object.values(slots)) : -1;
-  const slotCount = Math.max(1, maxSlot + 1);
+  const vs = Object.values(slots);
+  const slotCount = p.slotCount ?? Math.max(1, (vs.length > 0 ? Math.max(...vs) : -1) + 1);
   const laneWPct = 100 / slotCount;
 
   return (
@@ -472,8 +502,13 @@ function PortraitWeek(p: WeekProps) {
           const barEndDate = pop.endDate < weekEnd ? pop.endDate : weekEnd;
           const startOffsetDays = daysBetween(weekStart, barStartDate);
           const endOffsetDays = daysBetween(weekStart, barEndDate);
-          const top = startOffsetDays * DAY_ROW_H;
-          const bottom = (endOffsetDays + 1) * DAY_ROW_H;
+          // When the experiment continues into the previous/next week, let the bar flow
+          // flush to the week edge (no rounding, no padding) so it reads as one strip
+          // across the WeekHeader break.
+          const continuesAbove = pop.startDate < weekStart;
+          const continuesBelow = pop.endDate > weekEnd;
+          const top = continuesAbove ? 0 : startOffsetDays * DAY_ROW_H + 3;
+          const bottom = continuesBelow ? totalHeight : (endOffsetDays + 1) * DAY_ROW_H - 3;
           const isSelected = p.selectedPopId === pop.id && !p.selectedEventId;
           const barEvents = p.events.filter(ev =>
             ev.populationId === pop.id &&
@@ -484,14 +519,20 @@ function PortraitWeek(p: WeekProps) {
             <div
               key={pop.id}
               data-bar-v
-              className={`absolute overflow-visible rounded-xl ${isSelected ? 'ring-2 ring-offset-2 ring-indigo-500' : ''}`}
+              className={`absolute overflow-visible ${isSelected ? 'ring-2 ring-offset-2 ring-indigo-500' : ''}`}
               style={{
-                top: top + 3,
-                height: bottom - top - 6,
+                top,
+                height: bottom - top,
                 left: `calc(${slot * laneWPct}% + 2px)`,
                 width: `calc(${laneWPct}% - 4px)`,
                 backgroundColor: pop.color + '18',
                 border: `2px solid ${pop.color}80`,
+                borderTopWidth: continuesAbove ? 0 : 2,
+                borderBottomWidth: continuesBelow ? 0 : 2,
+                borderTopLeftRadius: continuesAbove ? 0 : 12,
+                borderTopRightRadius: continuesAbove ? 0 : 12,
+                borderBottomLeftRadius: continuesBelow ? 0 : 12,
+                borderBottomRightRadius: continuesBelow ? 0 : 12,
               }}
               onClick={(e) => { e.stopPropagation(); p.onSelectPop(pop.id); }}
               onTouchStart={(e) => {
