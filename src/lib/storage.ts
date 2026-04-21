@@ -9,13 +9,13 @@ const POPULATIONS_KEY = 'cell-scheduler:populations';
 const SUBEVENTS_KEY = 'cell-scheduler:subevents';
 const CONNECTIONS_KEY = 'cell-scheduler:connections';
 
-function getItems<T>(key: string): T[] {
+export function getItems<T>(key: string): T[] {
   if (typeof window === 'undefined') return [];
   const raw = localStorage.getItem(key);
   return raw ? JSON.parse(raw) : [];
 }
 
-function setItems<T>(key: string, items: T[]): void {
+export function setItems<T>(key: string, items: T[]): void {
   localStorage.setItem(key, JSON.stringify(items));
 }
 

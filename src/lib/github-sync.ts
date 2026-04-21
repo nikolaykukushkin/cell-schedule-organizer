@@ -22,7 +22,7 @@ function generateMarkdown(pop: CellPopulation, popEvents: SubEvent[]): { filenam
   let eventLines = '';
   if (popEvents.length > 0) {
     eventLines = '\n## Events\n\n';
-    for (const ev of popEvents.sort((a, b) => a.startDate.localeCompare(b.startDate))) {
+    for (const ev of popEvents.sort((a, b) => a.startDate.localeCompare(b.startDate) || a.startHour - b.startHour)) {
       const span = ev.startDate === ev.endDate ? ev.startDate : `${ev.startDate} to ${ev.endDate}`;
       eventLines += `- **${ev.label}** (${span})${ev.comments ? ` — ${ev.comments}` : ''}\n`;
     }
