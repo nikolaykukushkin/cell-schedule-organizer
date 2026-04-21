@@ -18,6 +18,12 @@ import EventPanel from './EventPanel';
 import NewPopulationDialog from './NewPopulationDialog';
 import { SyncBadge } from './CalendarGrid';
 
+// Fraction of bar length near the top/bottom that counts as "edge" for resize.
+// Also capped by a pixel threshold so edges stay reachable on very long bars.
+const EDGE_FRAC = 0.25;
+const EDGE_MAX_PX = 40;
+const DOUBLE_TAP_MS = 400;
+
 const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -68,6 +74,32 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
 
   const [selectedPopId, setSelectedPopId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  // First tap highlights; second tap on the same item opens the parameters panel.
+  const [panelVisible, setPanelVisible] = useState(false);
+  const lastTap = useRef<{ kind: 'pop' | 'event'; id: string; time: number } | null>(null);
+
+  // Active resize: when the user long-presses the edge of an already-highlighted
+  // bar or event, we switch into this mode instead of creating something new.
+  const [activeResize, setActiveResize] = useState<
+    | { kind: 'pop'; id: string; edge: 'start' | 'end' }
+    | { kind: 'event'; id: string; edge: 'start' | 'end' }
+    | null
+  >(null);
+
+  // Active drag-create inside an existing bar (long-press on an unselected bar).
+  const [activeEventCreate, setActiveEventCreate] = useState<
+    | { popId: string; startDate: string; startHour: number; endDate: string; endHour: number }
+    | null
+  >(null);
+
+  // Active move: short-press + immediate drag on a bar or event translates it by day.
+  // `anchor` is the last-seen day under the finger — moves are incremental so rounding
+  // never drifts.
+  const activeMove = useRef<
+    | { kind: 'pop'; id: string; anchor: string }
+    | { kind: 'event'; id: string; anchor: string }
+    | null
+  >(null);
 
   const [dragStart, setDragStart] = useState<string | null>(null);
   const [dragEnd, setDragEnd] = useState<string | null>(null);
@@ -198,21 +230,36 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
     setSelectedPopId(newPopId); setSelectedEventId(null);
   }, [populations, events]);
 
-  // Touch → date
+  // Touch → date. During an active drag the finger usually sits on top of a bar,
+  // which hides the underlying day cell from elementFromPoint. Fall back to a
+  // geometric scan over all [data-day] elements so dragging still tracks the day.
   const getDateFromTouch = useCallback((clientX: number, clientY: number): string | null => {
-    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-    if (!el) return null;
-    const dayEl = el.closest('[data-day]') as HTMLElement | null;
-    if (!dayEl) return null;
-    return dayEl.dataset.day || null;
+    const hit = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    const direct = hit?.closest('[data-day]') as HTMLElement | null;
+    if (direct) return direct.dataset.day || null;
+    const nodes = document.querySelectorAll<HTMLElement>('[data-day]');
+    for (const el of nodes) {
+      const r = el.getBoundingClientRect();
+      if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+        return el.dataset.day || null;
+      }
+    }
+    return null;
   }, []);
 
-  // Long-press to create: a 500 ms hold on an empty cell starts drag-create.
-  // Any finger movement before the timer fires cancels it → native scroll runs normally.
+  // Track whether the current touch started on a blank cell so touchEnd can tell a
+  // "tap to deselect" from a "tap on bar" (which clears this ref implicitly).
+  const blankTapRef = useRef<{ date: string } | null>(null);
+
+  // Long-press to create: a 500 ms hold on an empty cell starts drag-create — but
+  // only when nothing is currently highlighted. If something is selected, a tap on
+  // blank deselects instead (handled in touchEnd).
   const onTouchStartCell = useCallback((dateStr: string, e: React.TouchEvent) => {
     const t = e.touches[0];
     touchOrigin.current = { x: t.clientX, y: t.clientY, moved: false, date: dateStr };
+    blankTapRef.current = { date: dateStr };
     if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    if (selectedPopId !== null || selectedEventId !== null) return;
     longPressTimer.current = setTimeout(() => {
       longPressTimer.current = null;
       if (touchOrigin.current && !touchOrigin.current.moved) {
@@ -222,10 +269,222 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
         if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
       }
     }, 500);
+  }, [selectedPopId, selectedEventId]);
+
+  // --- New interaction model -------------------------------------------------
+
+  const clearSelection = useCallback(() => {
+    setSelectedPopId(null);
+    setSelectedEventId(null);
+    setPanelVisible(false);
+    lastTap.current = null;
   }, []);
+
+  const handleTapPop = useCallback((popId: string) => {
+    const now = Date.now();
+    const prev = lastTap.current;
+    const alreadyHighlighted = selectedPopId === popId && !selectedEventId;
+    const isSecondTap =
+      alreadyHighlighted && prev?.kind === 'pop' && prev.id === popId && now - prev.time < DOUBLE_TAP_MS;
+    if (isSecondTap) {
+      setPanelVisible(true);
+    } else {
+      setSelectedPopId(popId);
+      setSelectedEventId(null);
+      setPanelVisible(false);
+    }
+    lastTap.current = { kind: 'pop', id: popId, time: now };
+  }, [selectedPopId, selectedEventId]);
+
+  const handleTapEvent = useCallback((eventId: string, popId: string) => {
+    const now = Date.now();
+    const prev = lastTap.current;
+    const alreadyHighlighted = selectedEventId === eventId;
+    const isSecondTap =
+      alreadyHighlighted && prev?.kind === 'event' && prev.id === eventId && now - prev.time < DOUBLE_TAP_MS;
+    if (isSecondTap) {
+      setPanelVisible(true);
+    } else {
+      setSelectedEventId(eventId);
+      setSelectedPopId(popId);
+      setPanelVisible(false);
+    }
+    lastTap.current = { kind: 'event', id: eventId, time: now };
+  }, [selectedEventId]);
+
+  const hasAnySelection = selectedPopId !== null || selectedEventId !== null;
+
+  // Resize commit: touchmove while activeResize is set → update the affected record's
+  // start or end date to the day currently under the finger.
+  const resizePopToDate = useCallback((popId: string, edge: 'start' | 'end', date: string) => {
+    setPopulations(prev => prev.map(p => {
+      if (p.id !== popId) return p;
+      if (edge === 'start') {
+        if (date > p.endDate) return p;
+        return { ...p, startDate: date };
+      } else {
+        if (date < p.startDate) return p;
+        return { ...p, endDate: date };
+      }
+    }));
+  }, []);
+
+  const resizeEventToDate = useCallback((evtId: string, edge: 'start' | 'end', date: string) => {
+    setEvents(prev => prev.map(ev => {
+      if (ev.id !== evtId) return ev;
+      const pop = populations.find(p => p.id === ev.populationId);
+      const clampedDate = pop
+        ? (date < pop.startDate ? pop.startDate : date > pop.endDate ? pop.endDate : date)
+        : date;
+      if (edge === 'start') {
+        if (clampedDate > ev.endDate) return ev;
+        return { ...ev, startDate: clampedDate };
+      } else {
+        if (clampedDate < ev.startDate) return ev;
+        return { ...ev, endDate: clampedDate };
+      }
+    }));
+  }, [populations]);
+
+  // Persist resize changes on release.
+  const commitResize = useCallback(() => {
+    if (!activeResize) return;
+    if (activeResize.kind === 'pop') {
+      const p = populations.find(x => x.id === activeResize.id);
+      if (p) storage.savePopulation(p);
+    } else {
+      const ev = events.find(x => x.id === activeResize.id);
+      if (ev) storage.saveSubEvent(ev);
+    }
+    setActiveResize(null);
+  }, [activeResize, populations, events]);
+
+  // Move helpers: incremental day-delta moves so rounding never accumulates error.
+  const movePopByDays = useCallback((popId: string, dayDelta: number) => {
+    if (dayDelta === 0) return;
+    setPopulations(prev => prev.map(p => {
+      if (p.id !== popId) return p;
+      return { ...p, startDate: addDays(p.startDate, dayDelta), endDate: addDays(p.endDate, dayDelta) };
+    }));
+    setEvents(prev => prev.map(ev => {
+      if (ev.populationId !== popId) return ev;
+      return { ...ev, startDate: addDays(ev.startDate, dayDelta), endDate: addDays(ev.endDate, dayDelta) };
+    }));
+  }, []);
+
+  const moveEventByDays = useCallback((evtId: string, dayDelta: number) => {
+    if (dayDelta === 0) return;
+    setEvents(prev => prev.map(ev => {
+      if (ev.id !== evtId) return ev;
+      const pop = populations.find(p => p.id === ev.populationId);
+      if (!pop) return ev;
+      const newStart = addDays(ev.startDate, dayDelta);
+      const newEnd = addDays(ev.endDate, dayDelta);
+      if (newStart < pop.startDate || newEnd > pop.endDate) return ev;
+      return { ...ev, startDate: newStart, endDate: newEnd };
+    }));
+  }, [populations]);
+
+  const commitMove = useCallback(() => {
+    const mv = activeMove.current;
+    if (!mv) return;
+    if (mv.kind === 'pop') {
+      const pop = populations.find(p => p.id === mv.id);
+      if (pop) {
+        storage.savePopulation(pop);
+        events.filter(ev => ev.populationId === pop.id).forEach(ev => storage.saveSubEvent(ev));
+      }
+    } else {
+      const ev = events.find(e => e.id === mv.id);
+      if (ev) storage.saveSubEvent(ev);
+    }
+    activeMove.current = null;
+  }, [populations, events]);
+
+  // Start a move drag (called from bar/event touch handlers when the user drags before
+  // the long-press timer fires).
+  const startMovePop = useCallback((popId: string, anchorDate: string) => {
+    activeMove.current = { kind: 'pop', id: popId, anchor: anchorDate };
+  }, []);
+  const startMoveEvent = useCallback((evtId: string, anchorDate: string) => {
+    activeMove.current = { kind: 'event', id: evtId, anchor: anchorDate };
+  }, []);
+
+  const startResizePop = useCallback((popId: string, edge: 'start' | 'end') => {
+    setActiveResize({ kind: 'pop', id: popId, edge });
+  }, []);
+  const startResizeEvent = useCallback((evtId: string, edge: 'start' | 'end') => {
+    setActiveResize({ kind: 'event', id: evtId, edge });
+  }, []);
+  const startCreateEventInBar = useCallback(
+    (popId: string, date: string, hour: number) => {
+      const sH = Math.max(0, Math.min(20, hour));
+      const eH = Math.min(23, sH + 3);
+      setActiveEventCreate({ popId, startDate: date, startHour: sH, endDate: date, endHour: eH });
+    },
+    [],
+  );
+
+  // Commit event-create on release: turn the dragged range into a real sub-event.
+  const commitEventCreate = useCallback(() => {
+    if (!activeEventCreate) return;
+    const { popId, startDate, startHour, endDate, endHour } = activeEventCreate;
+    const pop = populations.find(p => p.id === popId);
+    if (!pop) { setActiveEventCreate(null); return; }
+    const lo = startDate <= endDate ? startDate : endDate;
+    const hi = startDate <= endDate ? endDate : startDate;
+    const sDate = lo < pop.startDate ? pop.startDate : lo > pop.endDate ? pop.endDate : lo;
+    const eDate = hi < pop.startDate ? pop.startDate : hi > pop.endDate ? pop.endDate : hi;
+    const ev: SubEvent = {
+      id: crypto.randomUUID(),
+      populationId: popId,
+      label: 'New event',
+      comments: '',
+      allDay: sDate !== eDate,
+      startDate: sDate,
+      startHour,
+      endDate: eDate,
+      endHour,
+      color: SUB_EVENT_COLORS[events.filter(se => se.populationId === popId).length % SUB_EVENT_COLORS.length],
+    };
+    storage.saveSubEvent(ev);
+    setEvents(prev => [...prev, ev]);
+    setActiveEventCreate(null);
+    setSelectedEventId(ev.id);
+    setSelectedPopId(popId);
+    setPanelVisible(false);
+  }, [activeEventCreate, populations, events]);
 
   const onTouchMove = useCallback((e: React.TouchEvent) => {
     const t = e.touches[0];
+    // An active MOVE shifts the bar/event by whole days as the finger crosses day boundaries.
+    const mv = activeMove.current;
+    if (mv) {
+      const d = getDateFromTouch(t.clientX, t.clientY);
+      if (!d) return;
+      const delta = daysBetween(mv.anchor, d);
+      if (delta !== 0) {
+        if (mv.kind === 'pop') movePopByDays(mv.id, delta);
+        else moveEventByDays(mv.id, delta);
+        mv.anchor = d;
+      }
+      return;
+    }
+    // If a resize is active, update the target entity's boundary.
+    if (activeResize) {
+      const d = getDateFromTouch(t.clientX, t.clientY);
+      if (!d) return;
+      if (activeResize.kind === 'pop') resizePopToDate(activeResize.id, activeResize.edge, d);
+      else resizeEventToDate(activeResize.id, activeResize.edge, d);
+      return;
+    }
+    // If an event-create drag is active, extend its end date to the finger position.
+    if (activeEventCreate) {
+      const d = getDateFromTouch(t.clientX, t.clientY);
+      if (!d) return;
+      setActiveEventCreate(prev => prev ? { ...prev, endDate: d } : prev);
+      return;
+    }
     // If we haven't committed to create mode yet, watch for movement and cancel the long-press.
     if (!dragging.current) {
       const origin = touchOrigin.current;
@@ -241,15 +500,26 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
     }
     const d = getDateFromTouch(t.clientX, t.clientY);
     if (d) setDragEnd(d);
-  }, [getDateFromTouch]);
+  }, [getDateFromTouch, activeResize, activeEventCreate, resizePopToDate, resizeEventToDate, movePopByDays, moveEventByDays]);
 
   const onTouchEnd = useCallback(() => {
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+    const wasBlankTap = blankTapRef.current !== null && !touchOrigin.current?.moved;
     touchOrigin.current = null;
-    if (!dragging.current) return;
+    blankTapRef.current = null;
+    if (activeMove.current) { commitMove(); return; }
+    if (activeResize) { commitResize(); return; }
+    if (activeEventCreate) { commitEventCreate(); return; }
+    if (!dragging.current) {
+      // Short tap on a blank cell → deselect if anything was highlighted.
+      if (wasBlankTap && (selectedPopId !== null || selectedEventId !== null)) {
+        clearSelection();
+      }
+      return;
+    }
     dragging.current = false;
     if (dragStart && dragEnd) setShowNewDialog(true);
-  }, [dragStart, dragEnd]);
+  }, [dragStart, dragEnd, activeResize, activeEventCreate, commitMove, commitResize, commitEventCreate, selectedPopId, selectedEventId, clearSelection]);
 
   const selectedEvent = events.find(e => e.id === selectedEventId) || null;
   const selectedPop = populations.find(p => p.id === selectedPopId) || null;
@@ -331,6 +601,15 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
                 onCreateSubEvent={createEvent}
                 slots={portraitSlots}
                 slotCount={portraitSlotCount}
+                hasAnySelection={hasAnySelection}
+                onPopTap={handleTapPop}
+                onEventTap={handleTapEvent}
+                onPopMoveStart={startMovePop}
+                onEventMoveStart={startMoveEvent}
+                onPopResizeStart={startResizePop}
+                onEventResizeStart={startResizeEvent}
+                onStartCreateEventInBar={startCreateEventInBar}
+                activeEventCreate={activeEventCreate}
               />
             ) : (
               <LandscapeWeek
@@ -346,13 +625,22 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
                 onSelectPop={(id) => { setSelectedPopId(id); setSelectedEventId(null); }}
                 onSelectEvent={(id, popId) => { setSelectedEventId(id); setSelectedPopId(popId); }}
                 onCreateSubEvent={createEvent}
+                hasAnySelection={hasAnySelection}
+                onPopTap={handleTapPop}
+                onEventTap={handleTapEvent}
+                onPopMoveStart={startMovePop}
+                onEventMoveStart={startMoveEvent}
+                onPopResizeStart={startResizePop}
+                onEventResizeStart={startResizeEvent}
+                onStartCreateEventInBar={startCreateEventInBar}
+                activeEventCreate={activeEventCreate}
               />
             )}
           </div>
         ))}
       </div>
 
-      {(selectedEvent || selectedPop) && (
+      {panelVisible && (selectedEvent || selectedPop) && (
         <EventPanel
           subEvent={selectedEvent}
           population={selectedPop}
@@ -362,7 +650,7 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
           onUpdatePopulation={handleUpdatePopulation}
           onDeletePopulation={handleDeletePopulation}
           onRepeatNextWeek={handleRepeatNextWeek}
-          onClose={() => { setSelectedEventId(null); if (!selectedEvent) setSelectedPopId(null); }}
+          onClose={() => { setPanelVisible(false); }}
           isMobile
         />
       )}
@@ -417,6 +705,16 @@ interface WeekProps {
   onCreateSubEvent?: (popId: string, date: string, startHour: number) => void;
   slots?: Record<string, number>;
   slotCount?: number;
+  // New-model callbacks
+  hasAnySelection: boolean;
+  onPopTap: (popId: string) => void;
+  onEventTap: (evtId: string, popId: string) => void;
+  onPopMoveStart: (popId: string, anchorDate: string) => void;
+  onEventMoveStart: (evtId: string, anchorDate: string) => void;
+  onPopResizeStart: (popId: string, edge: 'start' | 'end') => void;
+  onEventResizeStart: (evtId: string, edge: 'start' | 'end') => void;
+  onStartCreateEventInBar: (popId: string, date: string, hour: number) => void;
+  activeEventCreate: { popId: string; startDate: string; startHour: number; endDate: string; endHour: number } | null;
 }
 
 function PortraitWeek(p: WeekProps) {
@@ -533,33 +831,67 @@ function PortraitWeek(p: WeekProps) {
                 borderTopRightRadius: continuesAbove ? 0 : 12,
                 borderBottomLeftRadius: continuesBelow ? 0 : 12,
                 borderBottomRightRadius: continuesBelow ? 0 : 12,
+                // Block default scroll so drag-to-move works. Users scroll weeks via
+                // empty cells or the day-label column.
+                touchAction: 'none',
               }}
-              onClick={(e) => { e.stopPropagation(); p.onSelectPop(pop.id); }}
               onTouchStart={(e) => {
+                // If the touch landed on a sub-event inside the bar, let the event's
+                // own handler deal with it; bar doesn't preempt.
+                if ((e.target as HTMLElement).closest('[data-event-v]')) return;
+                e.stopPropagation();
                 const t = e.touches[0];
-                // Long-press (no movement for LONG_PRESS_MS) → create event at tapped day.
-                // We can't know the exact hour from a bar tap (bar is vertical, days on Y axis);
-                // default to 9am local for the tapped day.
-                const held = { x: t.clientX, y: t.clientY, moved: false };
-                const onMove = (mv: TouchEvent) => {
-                  const m = mv.touches[0];
-                  if (Math.abs(m.clientX - held.x) > 6 || Math.abs(m.clientY - held.y) > 6) held.moved = true;
-                };
-                window.addEventListener('touchmove', onMove, { passive: true });
-                const timer = setTimeout(() => {
-                  window.removeEventListener('touchmove', onMove);
-                  if (held.moved) return;
-                  // Find which day was long-pressed by reading the data-day under the touch
-                  const el = document.elementFromPoint(held.x, held.y) as HTMLElement | null;
+                const barEl = e.currentTarget as HTMLElement;
+                const rect = barEl.getBoundingClientRect();
+                const yInBar = t.clientY - rect.top;
+                const edgeThresh = Math.min(EDGE_MAX_PX, rect.height * EDGE_FRAC);
+                const nearTop = !continuesAbove && yInBar < edgeThresh;
+                const nearBottom = !continuesBelow && yInBar > rect.height - edgeThresh;
+                const dayAtStart = (() => {
+                  const el = document.elementFromPoint(t.clientX, t.clientY) as HTMLElement | null;
                   const dayEl = el?.closest('[data-day]') as HTMLElement | null;
-                  const day = dayEl?.dataset.day || barStartDate;
-                  if (p.onCreateSubEvent) p.onCreateSubEvent(pop.id, day, 9);
-                }, LONG_PRESS_MS);
+                  return dayEl?.dataset.day || barStartDate;
+                })();
+                const origin = { x: t.clientX, y: t.clientY };
+                let resolved = false;
+                let moved = false;
+                const thisBarSelected = p.selectedPopId === pop.id && !p.selectedEventId;
+
+                const onMove = (mv: TouchEvent) => {
+                  if (resolved) return;
+                  const m = mv.touches[0];
+                  const dx = Math.abs(m.clientX - origin.x);
+                  const dy = Math.abs(m.clientY - origin.y);
+                  if (!moved && (dx > 6 || dy > 6)) {
+                    moved = true;
+                    resolved = true;
+                    clearTimeout(timer);
+                    // Short-press + immediate drag → MOVE the bar.
+                    p.onPopMoveStart(pop.id, dayAtStart);
+                  }
+                };
                 const onEnd = () => {
-                  clearTimeout(timer);
                   window.removeEventListener('touchmove', onMove);
                   window.removeEventListener('touchend', onEnd);
+                  clearTimeout(timer);
+                  if (!resolved && !moved) {
+                    // Short tap: highlight or open panel on double-tap.
+                    p.onPopTap(pop.id);
+                  }
                 };
+                const timer = setTimeout(() => {
+                  if (resolved) return;
+                  resolved = true;
+                  if (thisBarSelected && (nearTop || nearBottom)) {
+                    p.onPopResizeStart(pop.id, nearTop ? 'start' : 'end');
+                  } else if (!p.hasAnySelection) {
+                    p.onStartCreateEventInBar(pop.id, dayAtStart, 9);
+                  }
+                  // else: selection exists but not on this bar's edge → ignore long-press.
+                  if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
+                }, LONG_PRESS_MS);
+
+                window.addEventListener('touchmove', onMove, { passive: true });
                 window.addEventListener('touchend', onEnd);
               }}
             >
@@ -583,6 +915,26 @@ function PortraitWeek(p: WeekProps) {
                 )}
               </div>
 
+              {/* Drag-create ghost: translucent band showing the span being drawn. */}
+              {p.activeEventCreate && p.activeEventCreate.popId === pop.id && (() => {
+                const aec = p.activeEventCreate!;
+                const lo = aec.startDate < aec.endDate ? aec.startDate : aec.endDate;
+                const hi = aec.startDate < aec.endDate ? aec.endDate : aec.startDate;
+                const cLo = lo < barStartDate ? barStartDate : lo;
+                const cHi = hi > barEndDate ? barEndDate : hi;
+                const topDays = daysBetween(barStartDate, cLo);
+                const botDays = daysBetween(barStartDate, cHi) + 1;
+                const span = daysBetween(barStartDate, barEndDate) + 1;
+                const topPct = (topDays / span) * 100;
+                const hPct = ((botDays - topDays) / span) * 100;
+                return (
+                  <div
+                    className="absolute left-0 right-0 rounded-md ring-2 ring-white/70 pointer-events-none"
+                    style={{ top: `${topPct}%`, height: `${hPct}%`, backgroundColor: pop.color + 'b0' }}
+                  />
+                );
+              })()}
+
               {/* Sub-events as horizontal bands within the vertical bar */}
               {barEvents.map(ev => {
                 const evStart = ev.startDate < barStartDate ? barStartDate : ev.startDate;
@@ -598,8 +950,60 @@ function PortraitWeek(p: WeekProps) {
                     key={ev.id}
                     data-event-v
                     className={`absolute left-0 right-0 rounded-md flex items-center justify-center ${isEvSel ? 'ring-2 ring-white shadow-lg' : 'shadow'}`}
-                    style={{ top: `${evTopPct}%`, height: `${evHPct}%`, backgroundColor: ev.color + 'd0' }}
-                    onClick={(e) => { e.stopPropagation(); p.onSelectEvent(ev.id, ev.populationId); }}
+                    style={{ top: `${evTopPct}%`, height: `${evHPct}%`, backgroundColor: ev.color + 'd0', touchAction: 'none' }}
+                    onTouchStart={(e) => {
+                      e.stopPropagation();
+                      const t = e.touches[0];
+                      const evEl = e.currentTarget as HTMLElement;
+                      const rect = evEl.getBoundingClientRect();
+                      const yIn = t.clientY - rect.top;
+                      const edgeThresh = Math.min(EDGE_MAX_PX, rect.height * EDGE_FRAC);
+                      const nearTop = yIn < edgeThresh;
+                      const nearBottom = yIn > rect.height - edgeThresh;
+                      const dayAtStart = (() => {
+                        const el = document.elementFromPoint(t.clientX, t.clientY) as HTMLElement | null;
+                        const dayEl = el?.closest('[data-day]') as HTMLElement | null;
+                        return dayEl?.dataset.day || evStart;
+                      })();
+                      const origin = { x: t.clientX, y: t.clientY };
+                      let resolved = false;
+                      let moved = false;
+                      const thisEvSelected = p.selectedEventId === ev.id;
+
+                      const onMove = (mv: TouchEvent) => {
+                        if (resolved) return;
+                        const m = mv.touches[0];
+                        const dx = Math.abs(m.clientX - origin.x);
+                        const dy = Math.abs(m.clientY - origin.y);
+                        if (!moved && (dx > 6 || dy > 6)) {
+                          moved = true;
+                          resolved = true;
+                          clearTimeout(timer);
+                          // Short-press + immediate drag → MOVE the event within its bar.
+                          p.onEventMoveStart(ev.id, dayAtStart);
+                        }
+                      };
+                      const onEnd = () => {
+                        window.removeEventListener('touchmove', onMove);
+                        window.removeEventListener('touchend', onEnd);
+                        clearTimeout(timer);
+                        if (!resolved && !moved) {
+                          p.onEventTap(ev.id, ev.populationId);
+                        }
+                      };
+                      const timer = setTimeout(() => {
+                        if (resolved) return;
+                        resolved = true;
+                        if (thisEvSelected && (nearTop || nearBottom)) {
+                          p.onEventResizeStart(ev.id, nearTop ? 'start' : 'end');
+                          if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
+                        }
+                        // Long-press on an unselected event does nothing — no nested events.
+                      }, LONG_PRESS_MS);
+
+                      window.addEventListener('touchmove', onMove, { passive: true });
+                      window.addEventListener('touchend', onEnd);
+                    }}
                   >
                     <span className="text-[10px] font-bold text-white truncate px-1">{displayEventLabel(ev)}</span>
                   </div>
@@ -709,29 +1113,60 @@ function LandscapeWeek(p: WeekProps) {
                 height: `calc(${laneHPct}% - 4px)`,
                 backgroundColor: pop.color + '18',
                 border: `2px solid ${pop.color}80`,
+                touchAction: 'none',
               }}
-              onClick={(e) => { e.stopPropagation(); p.onSelectPop(pop.id); }}
               onTouchStart={(e) => {
+                if ((e.target as HTMLElement).closest('[data-event-h]')) return;
+                e.stopPropagation();
                 const t = e.touches[0];
-                const held = { x: t.clientX, y: t.clientY, moved: false };
-                const onMove = (mv: TouchEvent) => {
-                  const m = mv.touches[0];
-                  if (Math.abs(m.clientX - held.x) > 6 || Math.abs(m.clientY - held.y) > 6) held.moved = true;
-                };
-                window.addEventListener('touchmove', onMove, { passive: true });
-                const timer = setTimeout(() => {
-                  window.removeEventListener('touchmove', onMove);
-                  if (held.moved) return;
-                  const el = document.elementFromPoint(held.x, held.y) as HTMLElement | null;
+                const barEl = e.currentTarget as HTMLElement;
+                const rect = barEl.getBoundingClientRect();
+                const xIn = t.clientX - rect.left;
+                const edgeThresh = Math.min(EDGE_MAX_PX, rect.width * EDGE_FRAC);
+                const barStartsInWeek = pop.startDate >= weekStart;
+                const barEndsInWeek = pop.endDate <= weekEnd;
+                const nearLeft = barStartsInWeek && xIn < edgeThresh;
+                const nearRight = barEndsInWeek && xIn > rect.width - edgeThresh;
+                const dayAtStart = (() => {
+                  const el = document.elementFromPoint(t.clientX, t.clientY) as HTMLElement | null;
                   const dayEl = el?.closest('[data-day]') as HTMLElement | null;
-                  const day = dayEl?.dataset.day || sColDay;
-                  if (p.onCreateSubEvent) p.onCreateSubEvent(pop.id, day, 9);
-                }, LONG_PRESS_MS);
+                  return dayEl?.dataset.day || sColDay;
+                })();
+                const origin = { x: t.clientX, y: t.clientY };
+                let resolved = false;
+                let moved = false;
+                const thisBarSelected = p.selectedPopId === pop.id && !p.selectedEventId;
+
+                const onMove = (mv: TouchEvent) => {
+                  if (resolved) return;
+                  const m = mv.touches[0];
+                  const dx = Math.abs(m.clientX - origin.x);
+                  const dy = Math.abs(m.clientY - origin.y);
+                  if (!moved && (dx > 6 || dy > 6)) {
+                    moved = true;
+                    resolved = true;
+                    clearTimeout(timer);
+                    p.onPopMoveStart(pop.id, dayAtStart);
+                  }
+                };
                 const onEnd = () => {
-                  clearTimeout(timer);
                   window.removeEventListener('touchmove', onMove);
                   window.removeEventListener('touchend', onEnd);
+                  clearTimeout(timer);
+                  if (!resolved && !moved) p.onPopTap(pop.id);
                 };
+                const timer = setTimeout(() => {
+                  if (resolved) return;
+                  resolved = true;
+                  if (thisBarSelected && (nearLeft || nearRight)) {
+                    p.onPopResizeStart(pop.id, nearLeft ? 'start' : 'end');
+                  } else if (!p.hasAnySelection) {
+                    p.onStartCreateEventInBar(pop.id, dayAtStart, 9);
+                  }
+                  if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
+                }, LONG_PRESS_MS);
+
+                window.addEventListener('touchmove', onMove, { passive: true });
                 window.addEventListener('touchend', onEnd);
               }}
             >
@@ -743,6 +1178,26 @@ function LandscapeWeek(p: WeekProps) {
                   {pop.name}
                 </span>
               </div>
+
+              {/* Drag-create ghost */}
+              {p.activeEventCreate && p.activeEventCreate.popId === pop.id && (() => {
+                const aec = p.activeEventCreate!;
+                const lo = aec.startDate < aec.endDate ? aec.startDate : aec.endDate;
+                const hi = aec.startDate < aec.endDate ? aec.endDate : aec.startDate;
+                const cLo = lo < sColDay ? sColDay : lo;
+                const cHi = hi > eColDay ? eColDay : hi;
+                const span = daysBetween(sColDay, eColDay) + 1;
+                const leftDays = daysBetween(sColDay, cLo);
+                const rightDays = daysBetween(sColDay, cHi) + 1;
+                const leftP = (leftDays / span) * 100;
+                const wP = ((rightDays - leftDays) / span) * 100;
+                return (
+                  <div
+                    className="absolute top-0.5 bottom-0.5 rounded ring-2 ring-white/70 pointer-events-none"
+                    style={{ left: `${leftP}%`, width: `${wP}%`, backgroundColor: pop.color + 'b0' }}
+                  />
+                );
+              })()}
 
               {barEvents.map(ev => {
                 const evStart = ev.startDate < sColDay ? sColDay : ev.startDate;
@@ -758,8 +1213,56 @@ function LandscapeWeek(p: WeekProps) {
                     key={ev.id}
                     data-event-h
                     className={`absolute top-0.5 bottom-0.5 rounded flex items-center justify-center ${isEvSel ? 'ring-2 ring-white' : 'shadow'}`}
-                    style={{ left: `${evLeft}%`, width: `${evW}%`, backgroundColor: ev.color + 'd0' }}
-                    onClick={(e) => { e.stopPropagation(); p.onSelectEvent(ev.id, ev.populationId); }}
+                    style={{ left: `${evLeft}%`, width: `${evW}%`, backgroundColor: ev.color + 'd0', touchAction: 'none' }}
+                    onTouchStart={(e) => {
+                      e.stopPropagation();
+                      const t = e.touches[0];
+                      const evEl = e.currentTarget as HTMLElement;
+                      const rect = evEl.getBoundingClientRect();
+                      const xIn = t.clientX - rect.left;
+                      const edgeThresh = Math.min(EDGE_MAX_PX, rect.width * EDGE_FRAC);
+                      const nearLeft = xIn < edgeThresh;
+                      const nearRight = xIn > rect.width - edgeThresh;
+                      const dayAtStart = (() => {
+                        const el = document.elementFromPoint(t.clientX, t.clientY) as HTMLElement | null;
+                        const dayEl = el?.closest('[data-day]') as HTMLElement | null;
+                        return dayEl?.dataset.day || evStart;
+                      })();
+                      const origin = { x: t.clientX, y: t.clientY };
+                      let resolved = false;
+                      let moved = false;
+                      const thisEvSelected = p.selectedEventId === ev.id;
+
+                      const onMove = (mv: TouchEvent) => {
+                        if (resolved) return;
+                        const m = mv.touches[0];
+                        const dx = Math.abs(m.clientX - origin.x);
+                        const dy = Math.abs(m.clientY - origin.y);
+                        if (!moved && (dx > 6 || dy > 6)) {
+                          moved = true;
+                          resolved = true;
+                          clearTimeout(timer);
+                          p.onEventMoveStart(ev.id, dayAtStart);
+                        }
+                      };
+                      const onEnd = () => {
+                        window.removeEventListener('touchmove', onMove);
+                        window.removeEventListener('touchend', onEnd);
+                        clearTimeout(timer);
+                        if (!resolved && !moved) p.onEventTap(ev.id, ev.populationId);
+                      };
+                      const timer = setTimeout(() => {
+                        if (resolved) return;
+                        resolved = true;
+                        if (thisEvSelected && (nearLeft || nearRight)) {
+                          p.onEventResizeStart(ev.id, nearLeft ? 'start' : 'end');
+                          if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
+                        }
+                      }, LONG_PRESS_MS);
+
+                      window.addEventListener('touchmove', onMove, { passive: true });
+                      window.addEventListener('touchend', onEnd);
+                    }}
                   >
                     <span className="text-[9px] font-bold text-white truncate px-1">{displayEventLabel(ev)}</span>
                   </div>
