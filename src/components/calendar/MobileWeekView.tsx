@@ -22,9 +22,7 @@ const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const DAY_ROW_H = 72;       // portrait: height of each day row
-const BAR_LANE_W = 110;     // portrait: width of a vertical bar lane
-const BAR_LANE_H_LAND = 40; // landscape: height of a horizontal bar lane
-const LABEL_W = 64;         // portrait: width of left day-label column
+const LABEL_W = 56;         // portrait: width of left day-label column
 const LABEL_H = 28;         // landscape: height of top day-label row
 const LONG_PRESS_MS = 500;
 
@@ -36,8 +34,11 @@ function eventDurationHours(ev: SubEvent): number {
 }
 
 function displayEventLabel(ev: SubEvent): string {
-  if (eventDurationHours(ev) < 5) return ((ev.label || '?').trim().charAt(0).toUpperCase()) || '?';
-  return ev.label;
+  const h = eventDurationHours(ev);
+  const label = (ev.label || '').trim();
+  if (h <= 3) return (label.charAt(0) || '?').toUpperCase();
+  if (h < 20 && label.length > 3) return label.slice(0, 3).toUpperCase();
+  return label || '?';
 }
 
 interface Props {
@@ -72,6 +73,8 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
   const [dragEnd, setDragEnd] = useState<string | null>(null);
   const [showNewDialog, setShowNewDialog] = useState(false);
   const dragging = useRef(false);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchOrigin = useRef<{ x: number; y: number; moved: boolean; date: string } | null>(null);
 
   // Keep locals in sync with remote changes
   useEffect(() => {
@@ -108,10 +111,13 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
   const [scrolledOnce, setScrolledOnce] = useState(false);
 
   useEffect(() => {
+    setScrolledOnce(false);
+  }, [orientation]);
+  useEffect(() => {
     if (scrolledOnce) return;
     const el = weekRefs.current[anchorWeekIdx];
     if (el && scrollRef.current) {
-      el.scrollIntoView({ block: 'start', behavior: 'auto' });
+      el.scrollIntoView(orientation === 'portrait' ? { block: 'start', behavior: 'auto' } : { inline: 'start', behavior: 'auto' });
       setScrolledOnce(true);
     }
   }, [scrolledOnce, anchorWeekIdx, orientation]);
@@ -142,12 +148,12 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
     let d = date;
     if (d < pop.startDate) d = pop.startDate;
     if (d > pop.endDate) d = pop.endDate;
-    let sH = Math.max(0, Math.min(20, startHour));
-    if (sH + 3 > 23) sH = 20;
+    let sH = Math.max(0, Math.min(16, startHour));
+    if (sH + 7 > 23) sH = 16;
     const ev: SubEvent = {
       id: crypto.randomUUID(), populationId: popId,
       label: 'New event', comments: '', allDay: false,
-      startDate: d, startHour: sH, endDate: d, endHour: sH + 3,
+      startDate: d, startHour: sH, endDate: d, endHour: sH + 7,
       color: SUB_EVENT_COLORS[events.filter(se => se.populationId === popId).length % SUB_EVENT_COLORS.length],
     };
     storage.saveSubEvent(ev);
@@ -201,28 +207,48 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
     return dayEl.dataset.day || null;
   }, []);
 
-  const onTouchStartCell = useCallback((dateStr: string) => {
-    dragging.current = true;
-    setDragStart(dateStr);
-    setDragEnd(dateStr);
+  // Long-press to create: a 500 ms hold on an empty cell starts drag-create.
+  // Any finger movement before the timer fires cancels it → native scroll runs normally.
+  const onTouchStartCell = useCallback((dateStr: string, e: React.TouchEvent) => {
+    const t = e.touches[0];
+    touchOrigin.current = { x: t.clientX, y: t.clientY, moved: false, date: dateStr };
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = setTimeout(() => {
+      longPressTimer.current = null;
+      if (touchOrigin.current && !touchOrigin.current.moved) {
+        dragging.current = true;
+        setDragStart(dateStr);
+        setDragEnd(dateStr);
+        if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
+      }
+    }, 500);
   }, []);
 
   const onTouchMove = useCallback((e: React.TouchEvent) => {
-    if (!dragging.current) return;
     const t = e.touches[0];
+    // If we haven't committed to create mode yet, watch for movement and cancel the long-press.
+    if (!dragging.current) {
+      const origin = touchOrigin.current;
+      if (origin && !origin.moved) {
+        const dx = Math.abs(t.clientX - origin.x);
+        const dy = Math.abs(t.clientY - origin.y);
+        if (dx > 6 || dy > 6) {
+          origin.moved = true;
+          if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+        }
+      }
+      return; // let native scroll handle it
+    }
     const d = getDateFromTouch(t.clientX, t.clientY);
     if (d) setDragEnd(d);
   }, [getDateFromTouch]);
 
   const onTouchEnd = useCallback(() => {
+    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+    touchOrigin.current = null;
     if (!dragging.current) return;
     dragging.current = false;
-    if (dragStart && dragEnd && dragStart !== dragEnd) {
-      setShowNewDialog(true);
-    } else if (dragStart && dragEnd && dragStart === dragEnd) {
-      // Single tap: open quick-create from that day (1 day range)
-      setShowNewDialog(true);
-    }
+    if (dragStart && dragEnd) setShowNewDialog(true);
   }, [dragStart, dragEnd]);
 
   const selectedEvent = events.find(e => e.id === selectedEventId) || null;
@@ -237,20 +263,23 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
           className="text-xs font-bold text-indigo-600 px-2 py-1 rounded hover:bg-indigo-50"
           onClick={() => {
             const el = weekRefs.current[anchorWeekIdx];
-            el?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+            el?.scrollIntoView(orientation === 'portrait' ? { block: 'start', behavior: 'smooth' } : { inline: 'start', behavior: 'smooth' });
           }}
         >
           Today
         </button>
         <span className="ml-2 text-xs font-semibold text-slate-400">
-          {orientation === 'portrait' ? 'Swipe up/down to scroll weeks' : 'Swipe to scroll weeks'}
+          {orientation === 'portrait' ? 'Swipe up/down to scroll weeks' : 'Swipe left/right for weeks'}
         </span>
         <SyncBadge status={syncStatus} />
       </div>
 
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-50"
+        className={orientation === 'portrait'
+          ? 'flex-1 overflow-y-auto overflow-x-hidden bg-slate-50'
+          : 'flex-1 overflow-x-auto overflow-y-hidden bg-slate-50 flex'
+        }
         onTouchMove={onTouchMove}
         onTouchEnd={onTouchEnd}
       >
@@ -258,9 +287,12 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
           <div
             key={wi}
             ref={el => { weekRefs.current[wi] = el; }}
-            className="bg-white border-b-4 border-slate-100"
+            className={orientation === 'portrait'
+              ? 'bg-white border-b-4 border-slate-100'
+              : 'bg-white border-r-4 border-slate-100 flex-shrink-0 w-screen h-full flex flex-col'
+            }
           >
-            <WeekHeader week={week} />
+            <WeekHeader week={week} orientation={orientation} />
             {orientation === 'portrait' ? (
               <PortraitWeek
                 week={week}
@@ -329,13 +361,16 @@ export default function MobileWeekView({ experimentId, orientation, syncStatus }
   );
 }
 
-function WeekHeader({ week }: { week: Date[] }) {
+function WeekHeader({ week, orientation }: { week: Date[]; orientation: 'portrait' | 'landscape' }) {
   const wsd = week[0], wed = week[6];
   const label = wsd.getMonth() === wed.getMonth()
     ? `${MONTH_SHORT[wsd.getMonth()]} ${wsd.getDate()}–${wed.getDate()}`
     : `${MONTH_SHORT[wsd.getMonth()]} ${wsd.getDate()} – ${MONTH_SHORT[wed.getMonth()]} ${wed.getDate()}`;
+  const cls = orientation === 'portrait'
+    ? 'sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-200 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500'
+    : 'bg-white/95 backdrop-blur border-b border-slate-200 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 flex-shrink-0';
   return (
-    <div className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-slate-200 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+    <div className={cls}>
       {label} <span className="text-slate-300 font-normal">· {wsd.getFullYear()}</span>
     </div>
   );
@@ -352,7 +387,7 @@ interface WeekProps {
   todayStr: string;
   dragRange: { start: string; end: string } | null;
   showNewDialog: boolean;
-  onTouchStartCell: (dateStr: string) => void;
+  onTouchStartCell: (dateStr: string, e: React.TouchEvent) => void;
   onSelectPop: (id: string) => void;
   onSelectEvent: (id: string, popId: string) => void;
   onCreateSubEvent?: (popId: string, date: string, startHour: number) => void;
@@ -380,11 +415,14 @@ function PortraitWeek(p: WeekProps) {
   }, [visible, weekStart, weekEnd]);
 
   const totalHeight = 7 * DAY_ROW_H;
+  const maxSlot = Object.values(slots).length > 0 ? Math.max(...Object.values(slots)) : -1;
+  const slotCount = Math.max(1, maxSlot + 1);
+  const laneWPct = 100 / slotCount;
 
   return (
-    <div className="flex" style={{ height: totalHeight }}>
+    <div className="flex relative w-full" style={{ height: totalHeight }}>
       {/* Day label / cell column */}
-      <div className="flex flex-col" style={{ width: LABEL_W }}>
+      <div className="flex flex-col flex-shrink-0 bg-white" style={{ width: LABEL_W }}>
         {p.week.map((d) => {
           const ds = toDateStr(d);
           const isToday = ds === p.todayStr;
@@ -397,7 +435,7 @@ function PortraitWeek(p: WeekProps) {
               style={{ height: DAY_ROW_H }}
               onTouchStart={(e) => {
                 if ((e.target as HTMLElement).closest('[data-bar-v]') || (e.target as HTMLElement).closest('[data-event-v]')) return;
-                p.onTouchStartCell(ds);
+                p.onTouchStartCell(ds, e);
               }}
             >
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{DAY_NAMES[(d.getDay() + 6) % 7]}</span>
@@ -421,7 +459,7 @@ function PortraitWeek(p: WeekProps) {
               style={{ top: idx * DAY_ROW_H, height: DAY_ROW_H }}
               onTouchStart={(e) => {
                 if ((e.target as HTMLElement).closest('[data-bar-v]') || (e.target as HTMLElement).closest('[data-event-v]')) return;
-                p.onTouchStartCell(ds);
+                p.onTouchStartCell(ds, e);
               }}
             />
           );
@@ -450,8 +488,8 @@ function PortraitWeek(p: WeekProps) {
               style={{
                 top: top + 3,
                 height: bottom - top - 6,
-                left: 4 + slot * BAR_LANE_W,
-                width: BAR_LANE_W - 8,
+                left: `calc(${slot * laneWPct}% + 2px)`,
+                width: `calc(${laneWPct}% - 4px)`,
                 backgroundColor: pop.color + '18',
                 border: `2px solid ${pop.color}80`,
               }}
@@ -557,26 +595,21 @@ function LandscapeWeek(p: WeekProps) {
   }, [visible, weekStart, weekEnd]);
 
   const maxSlot = Object.values(slots).length > 0 ? Math.max(0, ...Object.values(slots)) : -1;
-  const barArea = (maxSlot + 1) * BAR_LANE_H_LAND;
-  const contentHeight = LABEL_H + Math.max(80, barArea + 20);
+  const slotCount = Math.max(1, maxSlot + 1);
+  const laneHPct = 100 / slotCount;
 
   return (
-    <div className="relative" style={{ height: contentHeight }}>
-      {/* Day columns */}
-      <div className="grid grid-cols-7 h-full">
+    <div className="relative flex-1 flex flex-col min-h-0">
+      {/* Day columns (label row) */}
+      <div className="grid grid-cols-7 flex-shrink-0" style={{ height: LABEL_H }}>
         {p.week.map((d) => {
           const ds = toDateStr(d);
           const isToday = ds === p.todayStr;
           const inDrag = p.dragRange && !p.showNewDialog && ds >= p.dragRange.start && ds <= p.dragRange.end;
           return (
             <div
-              key={ds}
-              data-day={ds}
+              key={`h-${ds}`}
               className={`border-r border-slate-100 last:border-r-0 ${inDrag ? 'bg-indigo-50/70' : ''}`}
-              onTouchStart={(e) => {
-                if ((e.target as HTMLElement).closest('[data-bar-h]') || (e.target as HTMLElement).closest('[data-event-h]')) return;
-                p.onTouchStartCell(ds);
-              }}
             >
               <div className="flex items-baseline justify-center gap-1 py-1" style={{ height: LABEL_H }}>
                 <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">{DAY_NAMES[(d.getDay() + 6) % 7]}</span>
@@ -587,8 +620,27 @@ function LandscapeWeek(p: WeekProps) {
         })}
       </div>
 
-      {/* Horizontal bars */}
-      <div className="absolute inset-x-0" style={{ top: LABEL_H, bottom: 0 }}>
+      {/* Bar area — fills remaining vertical space, bars compress */}
+      <div className="relative flex-1 min-h-0">
+        {/* Touch-target day columns in the bar area */}
+        <div className="absolute inset-0 grid grid-cols-7">
+          {p.week.map((d) => {
+            const ds = toDateStr(d);
+            const inDrag = p.dragRange && !p.showNewDialog && ds >= p.dragRange.start && ds <= p.dragRange.end;
+            return (
+              <div
+                key={`c-${ds}`}
+                data-day={ds}
+                className={`border-r border-slate-100 last:border-r-0 ${inDrag ? 'bg-indigo-50/70' : ''}`}
+                onTouchStart={(e) => {
+                  if ((e.target as HTMLElement).closest('[data-bar-h]') || (e.target as HTMLElement).closest('[data-event-h]')) return;
+                  p.onTouchStartCell(ds, e);
+                }}
+              />
+            );
+          })}
+        </div>
+
         {visible.map(pop => {
           const slot = slots[pop.id];
           const sColDay = pop.startDate > weekStart ? pop.startDate : weekStart;
@@ -607,12 +659,13 @@ function LandscapeWeek(p: WeekProps) {
             <div
               key={pop.id}
               data-bar-h
+              data-pop-id={pop.id}
               className={`absolute rounded-lg overflow-visible ${isSelected ? 'ring-2 ring-offset-2 ring-indigo-500' : ''}`}
               style={{
-                top: 4 + slot * BAR_LANE_H_LAND,
+                top: `calc(${slot * laneHPct}% + 2px)`,
                 left: `calc(${leftPct}% + 2px)`,
                 width: `calc(${widthPct}% - 4px)`,
-                height: BAR_LANE_H_LAND - 4,
+                height: `calc(${laneHPct}% - 4px)`,
                 backgroundColor: pop.color + '18',
                 border: `2px solid ${pop.color}80`,
               }}

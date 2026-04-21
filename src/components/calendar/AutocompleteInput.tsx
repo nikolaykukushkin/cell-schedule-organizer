@@ -26,6 +26,11 @@ export default function AutocompleteInput({ value, onChange, suggestions, placeh
         ref={inputRef}
         type="text"
         autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        data-lpignore="true"
+        data-form-type="other"
         value={value || ''}
         onChange={e => { onChange(e.target.value); setOpen(true); }}
         onFocus={() => { setFocused(true); setOpen(true); }}

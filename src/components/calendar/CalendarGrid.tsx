@@ -31,11 +31,11 @@ function eventDurationHours(ev: SubEvent): number {
 }
 
 function displayEventLabel(ev: SubEvent): string {
-  if (eventDurationHours(ev) < 5) {
-    const first = (ev.label || '?').trim().charAt(0).toUpperCase();
-    return first || '?';
-  }
-  return ev.label;
+  const h = eventDurationHours(ev);
+  const label = (ev.label || '').trim();
+  if (h <= 3) return (label.charAt(0) || '?').toUpperCase();
+  if (h < 20 && label.length > 3) return label.slice(0, 3).toUpperCase();
+  return label || '?';
 }
 
 interface CalendarGridProps {
@@ -155,6 +155,14 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const goNext = () => { if (month === 11) { setMonth(0); setYear(y => y + 1); } else setMonth(m => m + 1); };
   const goToday = () => { setYear(today.getFullYear()); setMonth(today.getMonth()); };
 
+  // Which population bar (if any) is currently under the pointer?
+  const getPopIdAtPoint = useCallback((clientX: number, clientY: number): string | null => {
+    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    if (!el) return null;
+    const barEl = el.closest('[data-pop-id]') as HTMLElement | null;
+    return barEl?.dataset.popId || null;
+  }, []);
+
   // --- Global date+hour from mouse position ---
   const getDateHourFromGlobalMouse = useCallback((e: React.MouseEvent | MouseEvent): { date: string; hour: number } | null => {
     for (let wi = 0; wi < weekRowRefs.current.length; wi++) {
@@ -182,16 +190,16 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     setDragEnd(dateStr);
   }, []);
 
-  // --- Create a 4-hour event inside a population at given date+hour ---
+  // --- Create an 8-hour event inside a population at given date+hour ---
   const createEventAt = useCallback((popId: string, dateStr: string, startHour: number) => {
     const pop = populationsRef.current.find(p => p.id === popId);
     if (!pop) return;
     let d = dateStr;
     if (d < pop.startDate) d = pop.startDate;
     if (d > pop.endDate) d = pop.endDate;
-    let sH = Math.max(0, Math.min(20, startHour));
-    if (sH + 3 > 23) sH = 20;
-    const eH = sH + 3;
+    let sH = Math.max(0, Math.min(16, startHour));
+    if (sH + 7 > 23) sH = 16;
+    const eH = sH + 7;
     const ev: SubEvent = {
       id: crypto.randomUUID(),
       populationId: popId,
@@ -329,7 +337,8 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       }
     }
 
-    // Move event within its population. Option+drag = duplicate first.
+    // Move event. Option+drag = duplicate first. If pointer is over a different bar,
+    // reassign populationId so events can be copied across experiments.
     if (dragMode.current === 'move-event' && dragTargetId.current && dragAnchorDate.current) {
       if (e.altKey && !dragDuplicated.current) {
         dragDuplicated.current = true;
@@ -347,38 +356,61 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
 
       const evId = dragTargetId.current;
       const ev = eventsRef.current.find(x => x.id === evId);
-      const pop = ev ? populationsRef.current.find(p => p.id === ev.populationId) : undefined;
-      if (ev && pop) {
-        if (ev.allDay) {
-          const dayDelta = daysBetween(dragAnchorDate.current, dh.date);
-          if (dayDelta !== 0) {
-            dragAnchorDate.current = dh.date;
-            setEvents(prev => prev.map(x => {
-              if (x.id !== evId) return x;
-              const newStart = addDays(x.startDate, dayDelta);
-              const newEnd = addDays(x.endDate, dayDelta);
-              if (newStart < pop.startDate || newEnd > pop.endDate) return x;
-              const updated = { ...x, startDate: newStart, endDate: newEnd };
-              storage.saveSubEvent(updated);
-              return updated;
-            }));
-          }
-        } else {
-          // Sub-day event: shift by hour delta
-          const hourDelta = daysBetween(dragAnchorDate.current, dh.date) * 24 + (dh.hour - dragAnchorHour.current);
-          if (hourDelta !== 0) {
+      if (!ev) return;
+      const currentPop = populationsRef.current.find(p => p.id === ev.populationId);
+      if (!currentPop) return;
+
+      // Check if pointer is over a different bar → cross-population move.
+      const hoveredPopId = getPopIdAtPoint(e.clientX, e.clientY);
+      if (hoveredPopId && hoveredPopId !== ev.populationId) {
+        const targetPop = populationsRef.current.find(p => p.id === hoveredPopId);
+        if (targetPop) {
+          // Preserve event duration; snap start to pointer position inside target bar.
+          const durHours = Math.max(1, daysBetween(ev.startDate, ev.endDate) * 24 + (ev.endHour - ev.startHour + 1));
+          const startDate = dh.date;
+          const startHour = dh.hour;
+          const endPos = shiftDateHour(startDate, startHour, durHours - 1);
+          if (startDate >= targetPop.startDate && endPos.date <= targetPop.endDate) {
+            const updated = { ...ev, populationId: hoveredPopId, startDate, startHour, endDate: endPos.date, endHour: endPos.hour };
+            storage.saveSubEvent(updated);
+            setEvents(prev => prev.map(x => x.id === evId ? updated : x));
+            setSelectedPopId(hoveredPopId);
             dragAnchorDate.current = dh.date;
             dragAnchorHour.current = dh.hour;
-            setEvents(prev => prev.map(x => {
-              if (x.id !== evId) return x;
-              const s = shiftDateHour(x.startDate, x.startHour, hourDelta);
-              const e2 = shiftDateHour(x.endDate, x.endHour, hourDelta);
-              if (s.date < pop.startDate || e2.date > pop.endDate) return x;
-              const updated = { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
-              storage.saveSubEvent(updated);
-              return updated;
-            }));
           }
+          return;
+        }
+      }
+
+      // Same-population move.
+      if (ev.allDay) {
+        const dayDelta = daysBetween(dragAnchorDate.current, dh.date);
+        if (dayDelta !== 0) {
+          dragAnchorDate.current = dh.date;
+          setEvents(prev => prev.map(x => {
+            if (x.id !== evId) return x;
+            const newStart = addDays(x.startDate, dayDelta);
+            const newEnd = addDays(x.endDate, dayDelta);
+            if (newStart < currentPop.startDate || newEnd > currentPop.endDate) return x;
+            const updated = { ...x, startDate: newStart, endDate: newEnd };
+            storage.saveSubEvent(updated);
+            return updated;
+          }));
+        }
+      } else {
+        const hourDelta = daysBetween(dragAnchorDate.current, dh.date) * 24 + (dh.hour - dragAnchorHour.current);
+        if (hourDelta !== 0) {
+          dragAnchorDate.current = dh.date;
+          dragAnchorHour.current = dh.hour;
+          setEvents(prev => prev.map(x => {
+            if (x.id !== evId) return x;
+            const s = shiftDateHour(x.startDate, x.startHour, hourDelta);
+            const e2 = shiftDateHour(x.endDate, x.endHour, hourDelta);
+            if (s.date < currentPop.startDate || e2.date > currentPop.endDate) return x;
+            const updated = { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
+            storage.saveSubEvent(updated);
+            return updated;
+          }));
         }
       }
     }
@@ -418,7 +450,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         return ev;
       }));
     }
-  }, [getDateHourFromGlobalMouse, populations, cancelLongPress]);
+  }, [getDateHourFromGlobalMouse, populations, cancelLongPress, getPopIdAtPoint]);
 
   // --- Mouse up ---
   const handleMouseUp = useCallback(() => {
@@ -774,6 +806,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
                       <div
                         key={`${bar.pop.id}-${wi}`}
                         data-bar
+                        data-pop-id={bar.pop.id}
                         className={`
                           absolute cursor-grab active:cursor-grabbing overflow-visible z-10
                           ${isSelected ? 'ring-2 ring-offset-2 ring-indigo-500 shadow-lg' : ''}

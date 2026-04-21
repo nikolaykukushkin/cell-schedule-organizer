@@ -45,6 +45,11 @@ function Input({ ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
       autoComplete="off"
+      autoCorrect="off"
+      autoCapitalize="off"
+      spellCheck={false}
+      data-lpignore="true"
+      data-form-type="other"
       {...props}
       className={`w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none transition-all ${props.className || ''}`}
     />
@@ -154,15 +159,20 @@ export default function EventPanel({
           )}
           <div>
             <Label>Comments</Label>
-            <textarea autoComplete="off" value={subEvent.comments || ''} onChange={e => onUpdateSubEvent({ ...subEvent, comments: e.target.value })} placeholder="Notes about this event..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
+            <textarea autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} value={subEvent.comments || ''} onChange={e => onUpdateSubEvent({ ...subEvent, comments: e.target.value })} placeholder="Notes about this event..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
           </div>
           <div>
             <Label>Color</Label>
             <input type="color" value={subEvent.color} onChange={e => onUpdateSubEvent({ ...subEvent, color: e.target.value })} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
           </div>
-          <button onClick={() => onDeleteSubEvent(subEvent.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
-            Delete Event
-          </button>
+          <div className="pt-1 space-y-2">
+            <button onClick={onClose} className="w-full px-3 py-2.5 rounded-lg text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-sm">
+              Done
+            </button>
+            <button onClick={() => onDeleteSubEvent(subEvent.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
+              Delete Event
+            </button>
+          </div>
         </div>
       )}
 
@@ -213,13 +223,16 @@ export default function EventPanel({
           )}
           <div>
             <Label>Comments</Label>
-            <textarea autoComplete="off" value={population.comments || ''} onChange={e => onUpdatePopulation({ ...population, comments: e.target.value })} placeholder="Notes about this experiment..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
+            <textarea autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} value={population.comments || ''} onChange={e => onUpdatePopulation({ ...population, comments: e.target.value })} placeholder="Notes about this experiment..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
           </div>
           <div>
             <Label>Color</Label>
             <input type="color" value={population.color} onChange={e => onUpdatePopulation({ ...population, color: e.target.value })} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
           </div>
           <div className="pt-1 space-y-2">
+            <button onClick={onClose} className="w-full px-3 py-2.5 rounded-lg text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-sm">
+              Done
+            </button>
             <button onClick={handleAddToLabBook} disabled={labBookStatus === 'pushing'} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-100 transition-colors disabled:opacity-50">
               {labBookStatus === 'pushing' ? 'Pushing...' : labBookStatus === 'done' ? 'Added!' : labBookStatus === 'error' ? 'Failed — retry?' : 'Add to Lab Book'}
             </button>

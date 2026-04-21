@@ -69,6 +69,11 @@ export default function NewPopulationDialog({ startDate, endDate, onConfirm, onC
             <input
               type="text"
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              data-lpignore="true"
+              data-form-type="other"
               value={experimentLabel}
               onChange={e => setExperimentLabel(e.target.value)}
               placeholder="e.g. Exp 042"
@@ -99,6 +104,11 @@ export default function NewPopulationDialog({ startDate, endDate, onConfirm, onC
             <input
               type="text"
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              data-lpignore="true"
+              data-form-type="other"
               value={experimenter}
               onChange={e => setExperimenter(e.target.value)}
               placeholder="e.g. Nikolay"
@@ -158,6 +168,9 @@ export default function NewPopulationDialog({ startDate, endDate, onConfirm, onC
             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Comments</label>
             <textarea
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               value={comments}
               onChange={e => setComments(e.target.value)}
               placeholder="Notes about this experiment..."

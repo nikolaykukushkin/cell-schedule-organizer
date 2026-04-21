@@ -14,6 +14,10 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let started = false;
 let syncing = false;
 let syncDisabled = false;
+// IDs of records with un-acked local mutations. While an id is here, polls must NOT
+// overwrite its local state — otherwise in-progress edits (e.g. typing a label) flash-revert
+// to the server's stale value every 3 s.
+const pendingIds = new Set<string>();
 
 type Status = 'idle' | 'syncing' | 'error' | 'offline';
 let status: Status = 'idle';
@@ -38,6 +42,8 @@ export function onRemoteChange(cb: () => void): () => void {
 export function enqueue(m: Mutation) {
   if (syncDisabled) return;
   queue.push(m);
+  const id = m.row.id as string | undefined;
+  if (id) pendingIds.add(id);
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = setTimeout(flush, FLUSH_DEBOUNCE_MS);
 }
@@ -64,6 +70,13 @@ async function flush() {
       }
       setStatus('error');
       return;
+    }
+    // Successful flush: clear pending ids whose mutations are no longer in the queue
+    // (i.e. no new edits arrived during the flight).
+    for (const m of batch) {
+      const id = m.row.id as string | undefined;
+      if (!id) continue;
+      if (!queue.some(qm => qm.row.id === id)) pendingIds.delete(id);
     }
     setStatus('idle');
   } catch {
@@ -138,9 +151,25 @@ function applyFullSnapshot(experimentId: string, j: StateResponse) {
   localStorage.setItem('cell-scheduler:connections', JSON.stringify([...otherConns, ...conns]));
 }
 
+/** True while a form field is focused — used to suppress poll-driven overwrites during typing. */
+function isUserEditing(): boolean {
+  if (typeof document === 'undefined') return false;
+  const el = document.activeElement as HTMLElement | null;
+  if (!el) return false;
+  const tag = el.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (el.isContentEditable) return true;
+  return false;
+}
+
 /** Poll for deltas since last sync. Merges into localStorage. Emits change if anything changed. */
 async function pollDelta(experimentId: string) {
   if (syncDisabled || syncing) return;
+  // Skip polling while the user is actively editing a field — this is the main source of
+  // visible glitching (typed chars flash-revert when a poll response overwrites local state).
+  // This, combined with the pendingIds guard, matches how Google Calendar pauses pulls
+  // while you have a panel open for edits.
+  if (isUserEditing()) return;
   syncing = true;
   try {
     const since = localStorage.getItem(LAST_SYNC_KEY);
@@ -171,6 +200,7 @@ function applyDelta(j: StateResponse) {
     const existing = JSON.parse(localStorage.getItem('cell-scheduler:experiments') || '[]') as ExperimentGroup[];
     const byId = new Map(existing.map(e => [e.id, e]));
     for (const r of j.groups) {
+      if (pendingIds.has(r.id)) continue;
       if (r.deleted) byId.delete(r.id);
       else if (r.data) byId.set(r.id, r.data as ExperimentGroup);
     }
@@ -180,6 +210,7 @@ function applyDelta(j: StateResponse) {
     const existing = JSON.parse(localStorage.getItem('cell-scheduler:populations') || '[]') as CellPopulation[];
     const byId = new Map(existing.map(p => [p.id, p]));
     for (const r of j.populations) {
+      if (pendingIds.has(r.id)) continue;
       if (r.deleted) byId.delete(r.id);
       else if (r.data) byId.set(r.id, r.data as CellPopulation);
     }
@@ -189,6 +220,7 @@ function applyDelta(j: StateResponse) {
     const existing = JSON.parse(localStorage.getItem('cell-scheduler:subevents') || '[]') as SubEvent[];
     const byId = new Map(existing.map(e => [e.id, e]));
     for (const r of j.subEvents) {
+      if (pendingIds.has(r.id)) continue;
       if (r.deleted) byId.delete(r.id);
       else if (r.data) byId.set(r.id, r.data as SubEvent);
     }
@@ -198,6 +230,7 @@ function applyDelta(j: StateResponse) {
     const existing = JSON.parse(localStorage.getItem('cell-scheduler:connections') || '[]') as Connection[];
     const byId = new Map(existing.map(c => [c.id, c]));
     for (const r of j.connections) {
+      if (pendingIds.has(r.id)) continue;
       if (r.deleted) byId.delete(r.id);
       else if (r.data) byId.set(r.id, r.data as Connection);
     }
