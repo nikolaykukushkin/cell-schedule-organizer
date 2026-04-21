@@ -796,9 +796,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const BAR_V_OFFSET = 34;
   const MIN_BAR_HEIGHT = 14;
   const MIN_WEEK_HEIGHT = isMobile ? 60 : 110;
-  // Allow each week row to grow up to 1.5× its baseline; past that, bars compress vertically
-  // so weeks stay readable without runaway growth.
-  const MAX_WEEK_HEIGHT = Math.round(MIN_WEEK_HEIGHT * 1.5);
+  // Let each week row grow freely up to 4× its baseline — that's enough to fit ~6
+  // full-height bars before compression kicks in. Most weeks have 1-3 experiments
+  // in parallel, so compression only triggers in unusually dense views.
+  const MAX_WEEK_HEIGHT = Math.round(MIN_WEEK_HEIGHT * 4);
 
   if (isMobile) {
     return <MobileWeekView experimentId={experimentId} orientation={isLandscape ? 'landscape' : 'portrait'} syncStatus={syncStatus} />;
