@@ -866,8 +866,12 @@ function PortraitWeek(p: WeekProps) {
                     moved = true;
                     resolved = true;
                     clearTimeout(timer);
-                    // Short-press + immediate drag → MOVE the bar.
-                    p.onPopMoveStart(pop.id, dayAtStart);
+                    // Drag on a HIGHLIGHTED bar's edge → resize; otherwise move.
+                    if (thisBarSelected && (nearTop || nearBottom)) {
+                      p.onPopResizeStart(pop.id, nearTop ? 'start' : 'end');
+                    } else {
+                      p.onPopMoveStart(pop.id, dayAtStart);
+                    }
                   }
                 };
                 const onEnd = () => {
@@ -881,14 +885,13 @@ function PortraitWeek(p: WeekProps) {
                 };
                 const timer = setTimeout(() => {
                   if (resolved) return;
-                  resolved = true;
-                  if (thisBarSelected && (nearTop || nearBottom)) {
-                    p.onPopResizeStart(pop.id, nearTop ? 'start' : 'end');
-                  } else if (!p.hasAnySelection) {
+                  // Long-press only creates when nothing is highlighted anywhere.
+                  // On a highlighted bar, holding still does nothing — release becomes a tap.
+                  if (!p.hasAnySelection) {
+                    resolved = true;
                     p.onStartCreateEventInBar(pop.id, dayAtStart, 9);
+                    if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
                   }
-                  // else: selection exists but not on this bar's edge → ignore long-press.
-                  if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
                 }, LONG_PRESS_MS);
 
                 window.addEventListener('touchmove', onMove, { passive: true });
@@ -979,8 +982,12 @@ function PortraitWeek(p: WeekProps) {
                           moved = true;
                           resolved = true;
                           clearTimeout(timer);
-                          // Short-press + immediate drag → MOVE the event within its bar.
-                          p.onEventMoveStart(ev.id, dayAtStart);
+                          // Drag on a HIGHLIGHTED event's edge → resize; otherwise move.
+                          if (thisEvSelected && (nearTop || nearBottom)) {
+                            p.onEventResizeStart(ev.id, nearTop ? 'start' : 'end');
+                          } else {
+                            p.onEventMoveStart(ev.id, dayAtStart);
+                          }
                         }
                       };
                       const onEnd = () => {
@@ -991,15 +998,8 @@ function PortraitWeek(p: WeekProps) {
                           p.onEventTap(ev.id, ev.populationId);
                         }
                       };
-                      const timer = setTimeout(() => {
-                        if (resolved) return;
-                        resolved = true;
-                        if (thisEvSelected && (nearTop || nearBottom)) {
-                          p.onEventResizeStart(ev.id, nearTop ? 'start' : 'end');
-                          if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
-                        }
-                        // Long-press on an unselected event does nothing — no nested events.
-                      }, LONG_PRESS_MS);
+                      // Long-press on an event does nothing (no events on events).
+                      const timer = setTimeout(() => { /* intentionally no-op */ }, LONG_PRESS_MS);
 
                       window.addEventListener('touchmove', onMove, { passive: true });
                       window.addEventListener('touchend', onEnd);
@@ -1146,7 +1146,12 @@ function LandscapeWeek(p: WeekProps) {
                     moved = true;
                     resolved = true;
                     clearTimeout(timer);
-                    p.onPopMoveStart(pop.id, dayAtStart);
+                    // Drag on a HIGHLIGHTED bar's edge → resize; otherwise move.
+                    if (thisBarSelected && (nearLeft || nearRight)) {
+                      p.onPopResizeStart(pop.id, nearLeft ? 'start' : 'end');
+                    } else {
+                      p.onPopMoveStart(pop.id, dayAtStart);
+                    }
                   }
                 };
                 const onEnd = () => {
@@ -1157,13 +1162,12 @@ function LandscapeWeek(p: WeekProps) {
                 };
                 const timer = setTimeout(() => {
                   if (resolved) return;
-                  resolved = true;
-                  if (thisBarSelected && (nearLeft || nearRight)) {
-                    p.onPopResizeStart(pop.id, nearLeft ? 'start' : 'end');
-                  } else if (!p.hasAnySelection) {
+                  // Long-press only creates when nothing is highlighted.
+                  if (!p.hasAnySelection) {
+                    resolved = true;
                     p.onStartCreateEventInBar(pop.id, dayAtStart, 9);
+                    if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
                   }
-                  if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
                 }, LONG_PRESS_MS);
 
                 window.addEventListener('touchmove', onMove, { passive: true });
@@ -1242,7 +1246,12 @@ function LandscapeWeek(p: WeekProps) {
                           moved = true;
                           resolved = true;
                           clearTimeout(timer);
-                          p.onEventMoveStart(ev.id, dayAtStart);
+                          // Drag on a HIGHLIGHTED event's edge → resize; otherwise move.
+                          if (thisEvSelected && (nearLeft || nearRight)) {
+                            p.onEventResizeStart(ev.id, nearLeft ? 'start' : 'end');
+                          } else {
+                            p.onEventMoveStart(ev.id, dayAtStart);
+                          }
                         }
                       };
                       const onEnd = () => {
@@ -1251,14 +1260,8 @@ function LandscapeWeek(p: WeekProps) {
                         clearTimeout(timer);
                         if (!resolved && !moved) p.onEventTap(ev.id, ev.populationId);
                       };
-                      const timer = setTimeout(() => {
-                        if (resolved) return;
-                        resolved = true;
-                        if (thisEvSelected && (nearLeft || nearRight)) {
-                          p.onEventResizeStart(ev.id, nearLeft ? 'start' : 'end');
-                          if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(25);
-                        }
-                      }, LONG_PRESS_MS);
+                      // Long-press on an event does nothing (no events on events).
+                      const timer = setTimeout(() => { /* intentionally no-op */ }, LONG_PRESS_MS);
 
                       window.addEventListener('touchmove', onMove, { passive: true });
                       window.addEventListener('touchend', onEnd);
