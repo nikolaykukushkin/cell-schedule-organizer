@@ -17,17 +17,16 @@ function useLocalState<T>(
   const [local, setLocal] = useState<T | null>(propValue);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commitRef = useRef(onCommit);
-  commitRef.current = onCommit;
+  useEffect(() => { commitRef.current = onCommit; }, [onCommit]);
 
-  // Sync from parent when the entity *identity* changes (different id)
-  const prevId = useRef<string | null>(null);
-  useEffect(() => {
-    const id = (propValue as Record<string, unknown> | null)?.id as string | undefined;
-    if (id !== prevId.current) {
-      prevId.current = id ?? null;
-      setLocal(propValue);
-    }
-  }, [propValue]);
+  // Sync from parent when the entity *identity* changes (different id).
+  // React-recommended "store info from previous renders" pattern (set state during render).
+  const propId = (propValue as Record<string, unknown> | null)?.id as string | undefined ?? null;
+  const [trackedId, setTrackedId] = useState<string | null>(propId);
+  if (propId !== trackedId) {
+    setTrackedId(propId);
+    setLocal(propValue);
+  }
 
   const update = useCallback((v: T) => {
     setLocal(v);

@@ -38,6 +38,25 @@ export function daySpan(start: string, end: string): number {
   return Math.round((e.getTime() - s.getTime()) / 86400000) + 1;
 }
 
+/** Signed day-delta from a → b. Positive when b is later. */
+export function daysBetween(a: string, b: string): number {
+  const [ay, am, ad] = a.split('-').map(Number);
+  const [by, bm, bd] = b.split('-').map(Number);
+  return Math.round((new Date(by, bm - 1, bd).getTime() - new Date(ay, am - 1, ad).getTime()) / 86400000);
+}
+
+/** Build a contiguous list of N dates starting at originStr. */
+export function timelineRange(originStr: string, dayCount: number): Date[] {
+  const out: Date[] = [];
+  const o = parseDate(originStr);
+  for (let i = 0; i < dayCount; i++) {
+    const d = new Date(o);
+    d.setDate(o.getDate() + i);
+    out.push(d);
+  }
+  return out;
+}
+
 /** Add days to a date string */
 export function addDays(dateStr: string, days: number): string {
   const d = parseDate(dateStr);

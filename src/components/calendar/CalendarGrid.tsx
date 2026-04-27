@@ -8,53 +8,29 @@ import {
   POPULATION_COLORS,
   SUB_EVENT_COLORS,
   PlateType,
-  densityUnit,
-  platesLabel,
 } from '@/types';
-import { getMonthGrid, toDateStr, isInRange, rangesOverlap, addDays, shiftDateHour } from '@/lib/dates';
+import { addDays, daysBetween, shiftDateHour, toDateStr } from '@/lib/dates';
 import * as storage from '@/lib/storage';
 import { onRemoteChange, enqueue } from '@/lib/sync';
-import CalendarHeader from './CalendarHeader';
+import Timeline, { type Axis } from './Timeline';
 import EventPanel from './EventPanel';
 import NewPopulationDialog from './NewPopulationDialog';
-import MobileWeekView from './MobileWeekView';
-
-const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const LONG_PRESS_MS = 500;
-
-// Per-experiment memo: remembers each population's slot (lane) so dragging horizontally
-// doesn't shuffle bars up/down. Lives at module scope so it persists across re-renders
-// without a useRef (whose mutation during render trips react-hooks/immutability).
-const slotMemoByExperiment = new Map<string, Map<string, number>>();
-
-/** Total hours an event spans. Used to pick abbreviated label for small events. */
-function eventDurationHours(ev: SubEvent): number {
-  const [sy, sm, sd] = ev.startDate.split('-').map(Number);
-  const [ey, em, ed] = ev.endDate.split('-').map(Number);
-  const dayDelta = Math.round((new Date(ey, em - 1, ed).getTime() - new Date(sy, sm - 1, sd).getTime()) / 86400000);
-  return dayDelta * 24 + (ev.endHour + 1 - ev.startHour);
-}
-
-function displayEventLabel(ev: SubEvent): string {
-  const h = eventDurationHours(ev);
-  const label = (ev.label || '').trim();
-  if (h <= 3) return (label.charAt(0) || '?').toUpperCase();
-  if (h < 20 && label.length > 3) return label.slice(0, 3).toUpperCase();
-  return label || '?';
-}
+import ExperimentPopover from './ExperimentPopover';
+import IsolationToolbar from './IsolationToolbar';
 
 interface CalendarGridProps {
   experimentId: string;
   syncStatus?: string;
 }
 
-type DragMode = 'none' | 'create-pop' | 'move-pop' | 'move-event' | 'resize-pop-start' | 'resize-pop-end' | 'resize-event-start' | 'resize-event-end';
+interface PopoverState {
+  kind: 'pop' | 'event';
+  id: string;
+  popId: string;
+  anchor: DOMRect;
+}
 
 export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: CalendarGridProps) {
-  const today = new Date();
-  const [year, setYear] = useState(today.getFullYear());
-  const [month, setMonth] = useState(today.getMonth());
-
   const [populations, setPopulations] = useState<CellPopulation[]>(() =>
     storage.getPopulations(experimentId)
   );
@@ -65,26 +41,32 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     storage.getConnections(experimentId)
   );
 
-  // Refs mirroring latest state for use in drag callbacks (avoids stale closures)
+  // Stale-closure refs (kept in sync via effect to satisfy react-hooks/refs)
   const populationsRef = useRef(populations);
-  populationsRef.current = populations;
   const eventsRef = useRef(events);
-  eventsRef.current = events;
+  useEffect(() => { populationsRef.current = populations; }, [populations]);
+  useEffect(() => { eventsRef.current = events; }, [events]);
 
-  // Persist to localStorage via debounced effect (single source of truth: React state).
-  // Also enqueues Supabase sync for each changed item.
+  const [popover, setPopover] = useState<PopoverState | null>(null);
+  const [isolatedExperimentId, setIsolatedExperimentId] = useState<string | null>(null);
+  const [editingFullPanel, setEditingFullPanel] = useState(false);
+
+  const [showNewDialog, setShowNewDialog] = useState(false);
+  const [newDialogRange, setNewDialogRange] = useState<{ start: string; end: string } | null>(null);
+
+  const [scrollToTodayToken, setScrollToTodayToken] = useState(0);
+
+  // ---------- Persistence (debounced) ----------
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialMount = useRef(true);
   const prevPopsRef = useRef(populations);
   const prevEventsRef = useRef(events);
-  // Track whether we're currently applying remote changes (skip saving back)
   const applyingRemote = useRef(false);
   useEffect(() => {
     if (initialMount.current) { initialMount.current = false; return; }
     if (applyingRemote.current) { applyingRemote.current = false; return; }
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      // Write entire current state to localStorage
       const allPops = storage.getItems<CellPopulation>('cell-scheduler:populations');
       const otherPops = allPops.filter(p => p.experimentId !== experimentId);
       storage.setItems('cell-scheduler:populations', [...otherPops, ...populations]);
@@ -94,67 +76,31 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       const otherEvts = allEvts.filter(e => !popIds.has(e.populationId));
       storage.setItems('cell-scheduler:subevents', [...otherEvts, ...events]);
 
-      // Enqueue Supabase sync for changed/added/deleted populations
       const prevPopMap = new Map(prevPopsRef.current.map(p => [p.id, p]));
       const curPopMap = new Map(populations.map(p => [p.id, p]));
       for (const p of populations) {
-        if (prevPopMap.get(p.id) !== p) {
-          enqueue({ table: 'cell_populations', op: 'upsert', row: p as unknown as Record<string, unknown> });
-        }
+        if (prevPopMap.get(p.id) !== p) enqueue({ table: 'cell_populations', op: 'upsert', row: p as unknown as Record<string, unknown> });
       }
       for (const p of prevPopsRef.current) {
-        if (!curPopMap.has(p.id)) {
-          enqueue({ table: 'cell_populations', op: 'delete', row: { id: p.id } });
-        }
+        if (!curPopMap.has(p.id)) enqueue({ table: 'cell_populations', op: 'delete', row: { id: p.id } });
       }
-      // Enqueue for changed/added/deleted events
       const prevEvtMap = new Map(prevEventsRef.current.map(e => [e.id, e]));
       const curEvtMap = new Map(events.map(e => [e.id, e]));
       for (const e of events) {
-        if (prevEvtMap.get(e.id) !== e) {
-          enqueue({ table: 'sub_events', op: 'upsert', row: e as unknown as Record<string, unknown> });
-        }
+        if (prevEvtMap.get(e.id) !== e) enqueue({ table: 'sub_events', op: 'upsert', row: e as unknown as Record<string, unknown> });
       }
       for (const e of prevEventsRef.current) {
-        if (!curEvtMap.has(e.id)) {
-          enqueue({ table: 'sub_events', op: 'delete', row: { id: e.id } });
-        }
+        if (!curEvtMap.has(e.id)) enqueue({ table: 'sub_events', op: 'delete', row: { id: e.id } });
       }
-
       prevPopsRef.current = populations;
       prevEventsRef.current = events;
     }, 150);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
   }, [populations, events, experimentId]);
 
-  const [selectedPopId, setSelectedPopId] = useState<string | null>(null);
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  // Panel visibility split from selection: single click highlights, double
-  // click opens the parameters panel.
-  const [panelVisible, setPanelVisible] = useState(false);
-
-  // Mobile detection + orientation
-  const [isMobile, setIsMobile] = useState(false);
-  const [isLandscape, setIsLandscape] = useState(false);
-  useEffect(() => {
-    const check = () => {
-      setIsMobile(window.innerWidth < 768);
-      setIsLandscape(window.innerWidth > window.innerHeight);
-    };
-    check();
-    window.addEventListener('resize', check);
-    window.addEventListener('orientationchange', check);
-    return () => {
-      window.removeEventListener('resize', check);
-      window.removeEventListener('orientationchange', check);
-    };
-  }, []);
-
-  // Refresh from localStorage when the sync poller brings in remote changes.
-  // Skip if the user is actively dragging/editing to avoid overwriting in-progress edits.
+  // ---------- Remote-change sync ----------
   useEffect(() => {
     const off = onRemoteChange(() => {
-      if (dragMode.current !== 'none') return; // don't clobber active drag
       applyingRemote.current = true;
       const newPops = storage.getPopulations(experimentId);
       const newEvts = storage.getAllSubEvents(experimentId);
@@ -167,475 +113,166 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     return off;
   }, [experimentId]);
 
-  // Global safety-net: release outside the grid should also clear drag state.
+  // ---------- Responsive axis ----------
+  const [axis, setAxis] = useState<Axis>('horizontal');
   useEffect(() => {
-    const onUp = () => {
-      if (dragMode.current === 'none') return;
-      dragMode.current = 'none';
-      dragTargetId.current = null;
-      dragAnchorDate.current = null;
-      dragMoved.current = false;
+    const check = () => {
+      const isPortraitMobile = window.innerWidth < 768 && window.innerHeight > window.innerWidth;
+      setAxis(isPortraitMobile ? 'vertical' : 'horizontal');
     };
-    document.addEventListener('mouseup', onUp);
-    return () => document.removeEventListener('mouseup', onUp);
+    check();
+    window.addEventListener('resize', check);
+    window.addEventListener('orientationchange', check);
+    return () => {
+      window.removeEventListener('resize', check);
+      window.removeEventListener('orientationchange', check);
+    };
   }, []);
 
-  // Long-press timer (desktop mouse + mobile touch) for creating events on bars
-  const longTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const longTapPopId = useRef<string | null>(null);
-
-  const cancelLongPress = useCallback(() => {
-    if (longTapTimer.current) { clearTimeout(longTapTimer.current); longTapTimer.current = null; }
-    longTapPopId.current = null;
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
   }, []);
 
-  // Drag state
-  const dragMode = useRef<DragMode>('none');
-  const [dragStart, setDragStart] = useState<string | null>(null);
-  const [dragEnd, setDragEnd] = useState<string | null>(null);
-  const [showNewDialog, setShowNewDialog] = useState(false);
-  const dragTargetId = useRef<string | null>(null);
-  const dragMoved = useRef(false);
-  // For move operations: the date where the drag started (anchor point)
-  const dragAnchorDate = useRef<string | null>(null);
-  const dragAnchorHour = useRef<number>(0);
-  const dragDuplicated = useRef(false); // whether we already duplicated during this drag
-
-  const containerRef = useRef<HTMLDivElement>(null);
-  const weekRowRefs = useRef<(HTMLDivElement | null)[]>([]);
-
-  const gridDates = useMemo(() => getMonthGrid(year, month), [year, month]);
-  const weeks = useMemo(() => {
-    const w: Date[][] = [];
-    for (let i = 0; i < gridDates.length; i += 7) {
-      w.push(gridDates.slice(i, i + 7));
+  // ---------- Timeline range (continuous) ----------
+  const today = useMemo(() => new Date(), []);
+  const todayStr = toDateStr(today);
+  const { origin, dayCount } = useMemo(() => {
+    let minDate = todayStr;
+    let maxDate = todayStr;
+    for (const p of populations) {
+      if (p.startDate < minDate) minDate = p.startDate;
+      if (p.endDate > maxDate) maxDate = p.endDate;
     }
-    return w;
-  }, [gridDates]);
+    minDate = addDays(minDate, -60);
+    maxDate = addDays(maxDate, 365);
+    return { origin: minDate, dayCount: daysBetween(minDate, maxDate) + 1 };
+  }, [populations, todayStr]);
 
-  const gridStart = toDateStr(gridDates[0]);
-  const gridEnd = toDateStr(gridDates[gridDates.length - 1]);
+  // ---------- Lane assignment (greedy, stable) ----------
+  const { laneByPop, totalLanes } = useMemo(() => {
+    const sorted = [...populations].sort((a, b) =>
+      a.startDate.localeCompare(b.startDate) || a.startHour - b.startHour || a.id.localeCompare(b.id)
+    );
+    const laneEnds: string[] = []; // last endDate seen per lane
+    const result = new Map<string, number>();
+    for (const p of sorted) {
+      let lane = 0;
+      while (lane < laneEnds.length && p.startDate <= laneEnds[lane]) lane++;
+      laneEnds[lane] = p.endDate;
+      result.set(p.id, lane);
+    }
+    return { laneByPop: result, totalLanes: Math.max(1, laneEnds.length) };
+  }, [populations]);
 
-  const visiblePops = useMemo(() => {
-    // A pop is visible if its *extended* range (declared + any outside events)
-    // overlaps the month grid.
-    return populations.filter(p => {
-      let extStart = p.startDate;
-      let extEnd = p.endDate;
-      for (const ev of events) {
-        if (ev.populationId !== p.id) continue;
-        if (ev.startDate < extStart) extStart = ev.startDate;
-        if (ev.endDate > extEnd) extEnd = ev.endDate;
-      }
-      return rangesOverlap(extStart, extEnd, gridStart, gridEnd);
+  // ---------- Selection helpers ----------
+  const closePopover = useCallback(() => setPopover(null), []);
+  const handleSelectPop = useCallback((popId: string, anchor: DOMRect) => {
+    setPopover({ kind: 'pop', id: popId, popId, anchor });
+  }, []);
+  const handleSelectEvent = useCallback((evId: string, popId: string, anchor: DOMRect) => {
+    setPopover({ kind: 'event', id: evId, popId, anchor });
+  }, []);
+
+  // Recompute popover anchor (e.g. after scroll) by reading the DOM element back
+  const refreshPopoverAnchor = useCallback(() => {
+    setPopover(prev => {
+      if (!prev) return prev;
+      const sel = prev.kind === 'pop'
+        ? `[data-pop-id="${prev.id}"]`
+        : `[data-ev-id="${prev.id}"]`;
+      const el = document.querySelector(sel) as HTMLElement | null;
+      if (!el) return null;
+      return { ...prev, anchor: el.getBoundingClientRect() };
     });
-  }, [populations, events, gridStart, gridEnd]);
-
-  // Nav
-  const goPrev = () => { if (month === 0) { setMonth(11); setYear(y => y - 1); } else setMonth(m => m - 1); };
-  const goNext = () => { if (month === 11) { setMonth(0); setYear(y => y + 1); } else setMonth(m => m + 1); };
-  const goToday = () => { setYear(today.getFullYear()); setMonth(today.getMonth()); };
-
-  // Which population bar (if any) is currently under the pointer?
-  const getPopIdAtPoint = useCallback((clientX: number, clientY: number): string | null => {
-    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-    if (!el) return null;
-    const barEl = el.closest('[data-pop-id]') as HTMLElement | null;
-    return barEl?.dataset.popId || null;
   }, []);
 
-  // --- Global date+hour from mouse position ---
-  const getDateHourFromGlobalMouse = useCallback((e: React.MouseEvent | MouseEvent): { date: string; hour: number } | null => {
-    for (let wi = 0; wi < weekRowRefs.current.length; wi++) {
-      const rowEl = weekRowRefs.current[wi];
-      if (!rowEl) continue;
-      const rect = rowEl.getBoundingClientRect();
-      if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
-        const colWidth = rect.width / 7;
-        const xInRow = e.clientX - rect.left;
-        const col = Math.min(6, Math.max(0, Math.floor(xInRow / colWidth)));
-        const xInCol = xInRow - col * colWidth;
-        const hour = Math.min(23, Math.max(0, Math.floor((xInCol / colWidth) * 24)));
-        return { date: toDateStr(weeks[wi][col]), hour };
+  // ---------- Mutators ----------
+  const handleCreatePop = useCallback((startDate: string, endDate: string) => {
+    const s = startDate <= endDate ? startDate : endDate;
+    const e = startDate <= endDate ? endDate : startDate;
+    setNewDialogRange({ start: s, end: e });
+    setShowNewDialog(true);
+  }, []);
+
+  const handleMovePop = useCallback((popId: string, dayDelta: number) => {
+    setPopulations(prev => prev.map(p => p.id === popId ? { ...p, startDate: addDays(p.startDate, dayDelta), endDate: addDays(p.endDate, dayDelta) } : p));
+    setEvents(prev => prev.map(ev => ev.populationId === popId ? { ...ev, startDate: addDays(ev.startDate, dayDelta), endDate: addDays(ev.endDate, dayDelta) } : ev));
+  }, []);
+
+  const handleResizePop = useCallback((popId: string, edge: 'start' | 'end', date: string, hour: number) => {
+    setPopulations(prev => prev.map(p => {
+      if (p.id !== popId) return p;
+      if (edge === 'start' && (date < p.endDate || (date === p.endDate && hour < p.endHour))) {
+        return { ...p, startDate: date, startHour: hour };
       }
-    }
-    return null;
-  }, [weeks]);
-
-  // --- Drag: create population (on empty space) ---
-  const handleCellMouseDown = useCallback((dateStr: string, e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('[data-bar]') || (e.target as HTMLElement).closest('[data-event-box]')) return;
-    dragMode.current = 'create-pop';
-    dragMoved.current = false;
-    setDragStart(dateStr);
-    setDragEnd(dateStr);
+      if (edge === 'end' && (date > p.startDate || (date === p.startDate && hour > p.startHour))) {
+        return { ...p, endDate: date, endHour: hour };
+      }
+      return p;
+    }));
   }, []);
 
-  // --- Create an 8-hour event inside a population at given date+hour ---
-  const createEventAt = useCallback((popId: string, dateStr: string, startHour: number) => {
+  const handleCreateEvent = useCallback((popId: string, startDate: string, startHour: number, endDate: string, endHour: number) => {
     const pop = populationsRef.current.find(p => p.id === popId);
     if (!pop) return;
-    let d = dateStr;
-    if (d < pop.startDate) d = pop.startDate;
-    if (d > pop.endDate) d = pop.endDate;
-    let sH = Math.max(0, Math.min(16, startHour));
-    if (sH + 7 > 23) sH = 16;
-    const eH = sH + 7;
+    // Clamp inside parent
+    let sd = startDate, sh = startHour, ed = endDate, eh = endHour;
+    if (sd < pop.startDate) { sd = pop.startDate; sh = 0; }
+    if (sd > pop.endDate) { sd = pop.endDate; sh = 0; }
+    if (ed < pop.startDate) { ed = pop.startDate; eh = 23; }
+    if (ed > pop.endDate) { ed = pop.endDate; eh = 23; }
     const ev: SubEvent = {
       id: crypto.randomUUID(),
       populationId: popId,
       label: 'New event',
       comments: '',
       allDay: false,
-      startDate: d,
-      startHour: sH,
-      endDate: d,
-      endHour: eH,
-      color: SUB_EVENT_COLORS[eventsRef.current.filter(se => se.populationId === popId).length % SUB_EVENT_COLORS.length],
+      startDate: sd, startHour: sh,
+      endDate: ed, endHour: eh,
+      color: SUB_EVENT_COLORS[eventsRef.current.filter(e => e.populationId === popId).length % SUB_EVENT_COLORS.length],
     };
     setEvents(prev => [...prev, ev]);
-    setSelectedEventId(ev.id);
-    setSelectedPopId(popId);
   }, []);
 
-  // --- Mousedown on population bar: prepare to move (or duplicate with Option). Long-press creates event. ---
-  const handleBarMouseDown = useCallback((popId: string, e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('[data-event-box]') || (e.target as HTMLElement).closest('[data-resize]')) return;
-    e.stopPropagation();
-    const dh = getDateHourFromGlobalMouse(e);
-    if (!dh) return;
-    dragMode.current = 'move-pop';
-    dragMoved.current = false;
-    dragDuplicated.current = false;
-    dragTargetId.current = popId;
-    dragAnchorDate.current = dh.date;
-    dragAnchorHour.current = dh.hour;
-    // Long-press timer: fires if no drag movement within LONG_PRESS_MS
-    cancelLongPress();
-    longTapPopId.current = popId;
-    longTapTimer.current = setTimeout(() => {
-      longTapTimer.current = null;
-      if (!dragMoved.current && longTapPopId.current === popId) {
-        dragMode.current = 'none';
-        createEventAt(popId, dh.date, dh.hour);
-      }
-      longTapPopId.current = null;
-    }, LONG_PRESS_MS);
-  }, [getDateHourFromGlobalMouse, cancelLongPress, createEventAt]);
-
-  // --- Mousedown on event box: prepare to move (or duplicate with Option) ---
-  const handleEventMouseDown = useCallback((eventId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if ((e.target as HTMLElement).closest('[data-resize]')) return;
-    const dh = getDateHourFromGlobalMouse(e);
-    if (!dh) return;
-    dragMode.current = 'move-event';
-    dragMoved.current = false;
-    dragDuplicated.current = false;
-    dragTargetId.current = eventId;
-    dragAnchorDate.current = dh.date;
-    dragAnchorHour.current = dh.hour;
-  }, [getDateHourFromGlobalMouse]);
-
-  // --- Resize handles ---
-  const handleResizePopStart = useCallback((popId: string, e: React.MouseEvent) => {
-    e.stopPropagation(); dragMode.current = 'resize-pop-start'; dragTargetId.current = popId; dragMoved.current = false;
-  }, []);
-  const handleResizePopEnd = useCallback((popId: string, e: React.MouseEvent) => {
-    e.stopPropagation(); dragMode.current = 'resize-pop-end'; dragTargetId.current = popId; dragMoved.current = false;
-  }, []);
-  const handleResizeEventStart = useCallback((eventId: string, e: React.MouseEvent) => {
-    e.stopPropagation(); dragMode.current = 'resize-event-start'; dragTargetId.current = eventId; dragMoved.current = false;
-  }, []);
-  const handleResizeEventEnd = useCallback((eventId: string, e: React.MouseEvent) => {
-    e.stopPropagation(); dragMode.current = 'resize-event-end'; dragTargetId.current = eventId; dragMoved.current = false;
+  const handleMoveEvent = useCallback((evId: string, hourDelta: number) => {
+    setEvents(prev => prev.map(ev => {
+      if (ev.id !== evId) return ev;
+      const pop = populationsRef.current.find(p => p.id === ev.populationId);
+      if (!pop) return ev;
+      const s = shiftDateHour(ev.startDate, ev.startHour, hourDelta);
+      const e2 = shiftDateHour(ev.endDate, ev.endHour, hourDelta);
+      if (s.date < pop.startDate || e2.date > pop.endDate) return ev;
+      return { ...ev, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
+    }));
   }, []);
 
-  // --- Global mouse move ---
-  const handleGlobalMouseMove = useCallback((e: React.MouseEvent) => {
-    // Safety net: if no mouse button is pressed, clear any stuck drag state.
-    // Fixes the "bar resizes on hover" bug when a mouseup happened outside the container.
-    if (e.buttons === 0 && dragMode.current !== 'none') {
-      dragMode.current = 'none';
-      dragTargetId.current = null;
-      dragAnchorDate.current = null;
-      dragMoved.current = false;
-      cancelLongPress();
-      return;
-    }
-    if (dragMode.current === 'none') return;
-    dragMoved.current = true;
-    // Movement cancels any pending long-press (so it becomes a drag, not a create)
-    cancelLongPress();
-    const dh = getDateHourFromGlobalMouse(e);
-    if (!dh) return;
-
-    if (dragMode.current === 'create-pop') {
-      setDragEnd(dh.date);
-    }
-
-    // Move population (shift all dates by delta). Option+drag = duplicate first.
-    if (dragMode.current === 'move-pop' && dragTargetId.current && dragAnchorDate.current) {
-      // Option-drag: duplicate population + events on first move
-      if (e.altKey && !dragDuplicated.current) {
-        dragDuplicated.current = true;
-        const origPopId = dragTargetId.current;
-        const origPop = populationsRef.current.find(p => p.id === origPopId);
-        if (origPop) {
-          const newPopId = crypto.randomUUID();
-          const newPop: CellPopulation = { ...origPop, id: newPopId, name: origPop.name + ' (copy)', color: POPULATION_COLORS[(populationsRef.current.length) % POPULATION_COLORS.length] };
-          // Copy all events with full data from current ref
-          const origEvents = eventsRef.current.filter(ev => ev.populationId === origPopId);
-          const newEvents: SubEvent[] = origEvents.map(ev => ({ ...ev, id: crypto.randomUUID(), populationId: newPopId }));
-          setPopulations(prev => [...prev, newPop]);
-          setEvents(prev => [...prev, ...newEvents]);
-          // Switch drag target to the new copy (original stays in place)
-          dragTargetId.current = newPopId;
-          setSelectedPopId(newPopId);
-          setSelectedEventId(null);
-        }
-      }
-
-      const dayDelta = daysBetween(dragAnchorDate.current, dh.date);
-      if (dayDelta !== 0) {
-        dragAnchorDate.current = dh.date;
-        const popId = dragTargetId.current;
-        setPopulations(prev => prev.map(p => {
-          if (p.id !== popId) return p;
-          return { ...p, startDate: addDays(p.startDate, dayDelta), endDate: addDays(p.endDate, dayDelta) };
-        }));
-        setEvents(prev => prev.map(ev => {
-          if (ev.populationId !== popId) return ev;
-          return { ...ev, startDate: addDays(ev.startDate, dayDelta), endDate: addDays(ev.endDate, dayDelta) };
-        }));
-      }
-    }
-
-    // Move event. Option+drag = duplicate first. If pointer is over a different bar,
-    // reassign populationId so events can be copied across experiments.
-    if (dragMode.current === 'move-event' && dragTargetId.current && dragAnchorDate.current) {
-      if (e.altKey && !dragDuplicated.current) {
-        dragDuplicated.current = true;
-        const origEvId = dragTargetId.current;
-        const origEv = eventsRef.current.find(ev => ev.id === origEvId);
-        if (origEv) {
-          const newEv: SubEvent = { ...origEv, id: crypto.randomUUID(), label: origEv.label + ' (copy)' };
-          setEvents(prev => [...prev, newEv]);
-          dragTargetId.current = newEv.id;
-          setSelectedEventId(newEv.id);
-          setSelectedPopId(newEv.populationId);
-        }
-      }
-
-      const evId = dragTargetId.current;
-      const ev = eventsRef.current.find(x => x.id === evId);
-      if (!ev) return;
-      const currentPop = populationsRef.current.find(p => p.id === ev.populationId);
-      if (!currentPop) return;
-
-      // Check if pointer is over a different bar → cross-population move.
-      const hoveredPopId = getPopIdAtPoint(e.clientX, e.clientY);
-      if (hoveredPopId && hoveredPopId !== ev.populationId) {
-        const targetPop = populationsRef.current.find(p => p.id === hoveredPopId);
-        if (targetPop) {
-          // Preserve event duration; snap start to pointer position inside target bar.
-          const durHours = Math.max(1, daysBetween(ev.startDate, ev.endDate) * 24 + (ev.endHour - ev.startHour + 1));
-          const startDate = dh.date;
-          const startHour = dh.hour;
-          const endPos = shiftDateHour(startDate, startHour, durHours - 1);
-          if (startDate >= targetPop.startDate && endPos.date <= targetPop.endDate) {
-            setEvents(prev => prev.map(x => x.id === evId
-              ? { ...x, populationId: hoveredPopId, startDate, startHour, endDate: endPos.date, endHour: endPos.hour }
-              : x));
-            setSelectedPopId(hoveredPopId);
-            dragAnchorDate.current = dh.date;
-            dragAnchorHour.current = dh.hour;
-          }
-          return;
-        }
-      }
-
-      // Same-population move.
-      if (ev.allDay) {
-        const dayDelta = daysBetween(dragAnchorDate.current, dh.date);
-        if (dayDelta !== 0) {
-          dragAnchorDate.current = dh.date;
-          setEvents(prev => prev.map(x => {
-            if (x.id !== evId) return x;
-            const newStart = addDays(x.startDate, dayDelta);
-            const newEnd = addDays(x.endDate, dayDelta);
-            if (newStart < currentPop.startDate || newEnd > currentPop.endDate) return x;
-            return { ...x, startDate: newStart, endDate: newEnd };
-          }));
-        }
+  const handleResizeEvent = useCallback((evId: string, edge: 'start' | 'end', date: string, hour: number) => {
+    setEvents(prev => prev.map(ev => {
+      if (ev.id !== evId) return ev;
+      const pop = populationsRef.current.find(p => p.id === ev.populationId);
+      if (!pop) return ev;
+      if (edge === 'start') {
+        if (date < pop.startDate || (date > ev.endDate || (date === ev.endDate && hour >= ev.endHour))) return ev;
+        return { ...ev, startDate: date, startHour: hour };
       } else {
-        const hourDelta = daysBetween(dragAnchorDate.current, dh.date) * 24 + (dh.hour - dragAnchorHour.current);
-        if (hourDelta !== 0) {
-          dragAnchorDate.current = dh.date;
-          dragAnchorHour.current = dh.hour;
-          setEvents(prev => prev.map(x => {
-            if (x.id !== evId) return x;
-            const s = shiftDateHour(x.startDate, x.startHour, hourDelta);
-            const e2 = shiftDateHour(x.endDate, x.endHour, hourDelta);
-            if (s.date < currentPop.startDate || e2.date > currentPop.endDate) return x;
-            return { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
-          }));
-        }
+        if (date > pop.endDate || (date < ev.startDate || (date === ev.startDate && hour <= ev.startHour))) return ev;
+        return { ...ev, endDate: date, endHour: hour };
       }
-    }
-
-    // Resize population
-    if ((dragMode.current === 'resize-pop-start' || dragMode.current === 'resize-pop-end') && dragTargetId.current) {
-      setPopulations(prev => prev.map(p => {
-        if (p.id !== dragTargetId.current) return p;
-        if (dragMode.current === 'resize-pop-start' && (dh.date < p.endDate || (dh.date === p.endDate && dh.hour < p.endHour))) {
-          return { ...p, startDate: dh.date, startHour: dh.hour };
-        }
-        if (dragMode.current === 'resize-pop-end' && (dh.date > p.startDate || (dh.date === p.startDate && dh.hour > p.startHour))) {
-          return { ...p, endDate: dh.date, endHour: dh.hour };
-        }
-        return p;
-      }));
-    }
-
-    // Resize event
-    if ((dragMode.current === 'resize-event-start' || dragMode.current === 'resize-event-end') && dragTargetId.current) {
-      setEvents(prev => prev.map(ev => {
-        if (ev.id !== dragTargetId.current) return ev;
-        if (dragMode.current === 'resize-event-start' && (dh.date < ev.endDate || (dh.date === ev.endDate && dh.hour < ev.endHour))) {
-          return { ...ev, startDate: dh.date, startHour: dh.hour };
-        }
-        if (dragMode.current === 'resize-event-end' && (dh.date > ev.startDate || (dh.date === ev.startDate && dh.hour > ev.startHour))) {
-          return { ...ev, endDate: dh.date, endHour: dh.hour };
-        }
-        return ev;
-      }));
-    }
-  }, [getDateHourFromGlobalMouse, populations, cancelLongPress, getPopIdAtPoint]);
-
-  // --- Mouse up ---
-  const handleMouseUp = useCallback(() => {
-    const mode = dragMode.current;
-    const moved = dragMoved.current;
-    dragMode.current = 'none';
-    dragTargetId.current = null;
-    dragAnchorDate.current = null;
-    dragMoved.current = false;
-    cancelLongPress();
-
-    if (mode === 'create-pop' && dragStart && dragEnd && moved) {
-      const s = dragStart < dragEnd ? dragStart : dragEnd;
-      const e = dragStart < dragEnd ? dragEnd : dragStart;
-      setDragStart(s);
-      setDragEnd(e);
-      setShowNewDialog(true);
-      return;
-    }
-    if (mode === 'create-pop' && !moved) {
-      setSelectedPopId(null);
-      setSelectedEventId(null);
-      setDragStart(null);
-      setDragEnd(null);
-    }
-    if (mode === 'move-pop' && !moved && dragTargetId.current) {
-      // Was actually stored before reset — use eventDragPopId pattern
-    }
-  }, [dragStart, dragEnd, cancelLongPress]);
-
-  // Single click on a bar only highlights; the panel opens on double-click.
-  const handleBarClick = useCallback((popId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if ((e.target as HTMLElement).closest('[data-event-box]')) return;
-    setSelectedPopId(popId);
-    setSelectedEventId(null);
-    setPanelVisible(false);
+    }));
   }, []);
 
-  const handleBarDoubleClick = useCallback((popId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if ((e.target as HTMLElement).closest('[data-event-box]')) return;
-    setSelectedPopId(popId);
-    setSelectedEventId(null);
-    setPanelVisible(true);
-  }, []);
-
-  const handleEventClick = useCallback((eventId: string, popId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setSelectedEventId(eventId);
-    setSelectedPopId(popId);
-    setPanelVisible(false);
-  }, []);
-
-  const handleEventDoubleClick = useCallback((eventId: string, popId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setSelectedEventId(eventId);
-    setSelectedPopId(popId);
-    setPanelVisible(true);
-  }, []);
-
-  // --- Keyboard: Delete key ---
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Backspace' || e.key === 'Delete') {
-        if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA' || (e.target as HTMLElement).tagName === 'SELECT') return;
-        if (selectedEventId) {
-          setEvents(prev => prev.filter(ev => ev.id !== selectedEventId));
-          setSelectedEventId(null);
-          e.preventDefault();
-        } else if (selectedPopId) {
-          setPopulations(prev => prev.filter(p => p.id !== selectedPopId));
-          setEvents(prev => prev.filter(ev => ev.populationId !== selectedPopId));
-          setConnections(prev => prev.filter(c => c.sourcePopulationId !== selectedPopId && c.targetPopulationId !== selectedPopId));
-          setSelectedPopId(null);
-          e.preventDefault();
-        }
-      }
-      if (e.key === 'Escape') {
-        setSelectedEventId(null);
-        setSelectedPopId(null);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedEventId, selectedPopId]);
-
-  const handleCreatePopulation = useCallback(
-    (data: { name: string; cellLine: string; passage: string; plateType: PlateType; plateCount: number; cellDensity: string; experimenter: string; experimentLabel: string; comments: string }) => {
-      if (!dragStart || !dragEnd) return;
-      const s = dragStart < dragEnd ? dragStart : dragEnd;
-      const e = dragStart < dragEnd ? dragEnd : dragStart;
-      const pop: CellPopulation = {
-        id: crypto.randomUUID(), experimentId,
-        name: data.name,
-        cellLine: data.cellLine,
-        passage: data.passage,
-        color: POPULATION_COLORS[populations.length % POPULATION_COLORS.length],
-        plateType: data.plateType, plateCount: data.plateCount, cellDensity: data.cellDensity,
-        experimenter: data.experimenter,
-        experimentLabel: data.experimentLabel,
-        comments: data.comments,
-        allDay: true,
-        startDate: s, startHour: 0, endDate: e, endHour: 23,
-      };
-      setPopulations(prev => [...prev, pop]);
-      setDragStart(null); setDragEnd(null); setShowNewDialog(false);
-      // Don't auto-open panel — just deselect
-      setSelectedPopId(null); setSelectedEventId(null);
-    },
-    [dragStart, dragEnd, experimentId, populations.length]
-  );
-
-  const handleCancelDialog = useCallback(() => {
-    setDragStart(null); setDragEnd(null); setShowNewDialog(false);
-  }, []);
-
-  // Update/delete handlers — React state is the source of truth; effect persists to localStorage
+  // Update + delete from the EventPanel
   const handleUpdateEvent = useCallback((updated: SubEvent) => {
     setEvents(prev => prev.map(e => (e.id === updated.id ? updated : e)));
   }, []);
   const handleDeleteEvent = useCallback((id: string) => {
     setEvents(prev => prev.filter(e => e.id !== id));
-    setSelectedEventId(null);
+    setPopover(null);
+    setEditingFullPanel(false);
   }, []);
   const handleUpdatePopulation = useCallback((updated: CellPopulation) => {
     setPopulations(prev => prev.map(p => (p.id === updated.id ? updated : p)));
@@ -644,8 +281,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     setPopulations(prev => prev.filter(p => p.id !== id));
     setEvents(prev => prev.filter(e => e.populationId !== id));
     setConnections(prev => prev.filter(c => c.sourcePopulationId !== id && c.targetPopulationId !== id));
-    setSelectedPopId(null); setSelectedEventId(null);
-  }, []);
+    setPopover(null);
+    setEditingFullPanel(false);
+    if (isolatedExperimentId === id) setIsolatedExperimentId(null);
+  }, [isolatedExperimentId]);
 
   const handleRepeatNextWeek = useCallback((popId: string) => {
     const pop = populationsRef.current.find(p => p.id === popId);
@@ -668,554 +307,192 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     }));
     setPopulations(prev => [...prev, newPop]);
     setEvents(prev => [...prev, ...newEvents]);
-    setSelectedPopId(newPopId);
-    setSelectedEventId(null);
   }, []);
 
-  // Computed ranges
-  const dragRange = useMemo(() => {
-    if (!dragStart || !dragEnd) return null;
-    const s = dragStart < dragEnd ? dragStart : dragEnd;
-    const e = dragStart < dragEnd ? dragEnd : dragStart;
-    return { start: s, end: e };
-  }, [dragStart, dragEnd]);
-
-  // Bar layout
-  const barLayout = useMemo(() => {
-    // Per-pop extension bounds — widen declared range to include any events that
-    // fell outside it (e.g. a coating event left before a shrunk experiment).
-    const popExt = new Map<string, { extStart: string; extEnd: string }>();
-    for (const pop of visiblePops) {
-      let extStart = pop.startDate;
-      let extEnd = pop.endDate;
-      for (const ev of events) {
-        if (ev.populationId !== pop.id) continue;
-        if (ev.startDate < extStart) extStart = ev.startDate;
-        if (ev.endDate > extEnd) extEnd = ev.endDate;
-      }
-      popExt.set(pop.id, { extStart, extEnd });
-    }
-
-    type Bar = {
-      pop: CellPopulation;
-      weekIdx: number;
-      // Outer (extended) horizontal fraction within the week
-      startFrac: number;
-      endFrac: number;
-      // Outer ext range clipped to this week, as date strings (for event filtering).
-      extStartDate: string;
-      extEndDate: string;
-      // Declared fractions — null when the declared range is entirely in another week
-      decStartFrac: number | null;
-      decEndFrac: number | null;
-      // Are the extended edges the pop's actual extended start/end (rather than a
-      // week-clip)? Used for corner rounding.
-      extIsBarStart: boolean;
-      extIsBarEnd: boolean;
-      // Do the declared start/end coincide with the ext start/end?
-      hasExtensionBefore: boolean;
-      hasExtensionAfter: boolean;
-      slot: number;
+  // ---------- Dialog confirm/cancel ----------
+  const handleConfirmNewPop = useCallback((data: { name: string; cellLine: string; passage: string; plateType: PlateType; plateCount: number; cellDensity: string; experimenter: string; experimentLabel: string; comments: string }) => {
+    if (!newDialogRange) return;
+    const pop: CellPopulation = {
+      id: crypto.randomUUID(),
+      experimentId,
+      name: data.name,
+      cellLine: data.cellLine,
+      passage: data.passage,
+      color: POPULATION_COLORS[populations.length % POPULATION_COLORS.length],
+      plateType: data.plateType,
+      plateCount: data.plateCount,
+      cellDensity: data.cellDensity,
+      experimenter: data.experimenter,
+      experimentLabel: data.experimentLabel,
+      comments: data.comments,
+      allDay: true,
+      startDate: newDialogRange.start, startHour: 0,
+      endDate: newDialogRange.end, endHour: 23,
     };
-    const allBars: Bar[] = [];
-    visiblePops.forEach(pop => {
-      const ext = popExt.get(pop.id)!;
-      const hasExtBefore = ext.extStart < pop.startDate;
-      const hasExtAfter = ext.extEnd > pop.endDate;
-      weeks.forEach((week, weekIdx) => {
-        const weekStart = toDateStr(week[0]);
-        const weekEnd = toDateStr(week[6]);
-        if (!rangesOverlap(ext.extStart, ext.extEnd, weekStart, weekEnd)) return;
+    setPopulations(prev => [...prev, pop]);
+    setShowNewDialog(false);
+    setNewDialogRange(null);
+  }, [newDialogRange, experimentId, populations.length]);
 
-        // Ext fractions (outer bar span in this week)
-        const extIsBarStart = ext.extStart >= weekStart;
-        const extIsBarEnd = ext.extEnd <= weekEnd;
-        let startFrac = 0;
-        if (extIsBarStart) {
-          const col = week.findIndex(d => toDateStr(d) === ext.extStart);
-          // Ext range is day-aligned (events use startHour separately); treat start hour as 0
-          startFrac = (col >= 0 ? col : 0);
-          // If the ext start coincides with the pop's declared start, respect startHour
-          if (ext.extStart === pop.startDate) startFrac += pop.startHour / 24;
-        }
-        let endFrac = 7;
-        if (extIsBarEnd) {
-          const col = week.findIndex(d => toDateStr(d) === ext.extEnd);
-          endFrac = (col >= 0 ? col : 6) + 1;
-          if (ext.extEnd === pop.endDate) endFrac = (col >= 0 ? col : 6) + (pop.endHour + 1) / 24;
-        }
+  const handleCancelNewPop = useCallback(() => {
+    setShowNewDialog(false);
+    setNewDialogRange(null);
+  }, []);
 
-        // Declared fractions (inner marker position) — only if declared overlaps this week.
-        let decStartFrac: number | null = null;
-        let decEndFrac: number | null = null;
-        if (rangesOverlap(pop.startDate, pop.endDate, weekStart, weekEnd)) {
-          const isDecStart = pop.startDate >= weekStart;
-          const isDecEnd = pop.endDate <= weekEnd;
-          decStartFrac = 0;
-          if (isDecStart) {
-            const col = week.findIndex(d => toDateStr(d) === pop.startDate);
-            decStartFrac = (col >= 0 ? col : 0) + pop.startHour / 24;
-          }
-          decEndFrac = 7;
-          if (isDecEnd) {
-            const col = week.findIndex(d => toDateStr(d) === pop.endDate);
-            decEndFrac = (col >= 0 ? col : 6) + (pop.endHour + 1) / 24;
-          }
-        }
-
-        const extStartDate = ext.extStart > weekStart ? ext.extStart : weekStart;
-        const extEndDate = ext.extEnd < weekEnd ? ext.extEnd : weekEnd;
-        allBars.push({
-          pop, weekIdx, startFrac, endFrac,
-          extStartDate, extEndDate,
-          decStartFrac, decEndFrac,
-          extIsBarStart, extIsBarEnd,
-          hasExtensionBefore: hasExtBefore, hasExtensionAfter: hasExtAfter,
-          slot: 0,
-        });
-      });
-    });
-
-    const memo = slotMemoByExperiment.get(experimentId) ?? new Map<string, number>();
-    const assignment = new Map<string, number>();
-    const slotConflicts = (popId: string, popBars: typeof allBars, slot: number) => {
-      for (const pb of popBars) {
-        for (const b of allBars) {
-          if (b.pop.id === popId) continue;
-          if (b.weekIdx !== pb.weekIdx) continue;
-          if (assignment.get(b.pop.id) !== slot) continue;
-          if (!(pb.startFrac >= b.endFrac || pb.endFrac <= b.startFrac)) return true;
-        }
-      }
-      return false;
-    };
-
-    // Place pops with remembered slots first (lowest remembered slot wins ties) so they
-    // lock their lane; then place new pops by start date for a sensible default.
-    const memoized = visiblePops
-      .filter(p => memo.has(p.id))
-      .sort((a, b) => (memo.get(a.id)! - memo.get(b.id)!) || a.id.localeCompare(b.id));
-    const fresh = visiblePops
-      .filter(p => !memo.has(p.id))
-      .sort((a, b) => a.startDate.localeCompare(b.startDate) || a.id.localeCompare(b.id));
-
-    for (const pop of [...memoized, ...fresh]) {
-      const popBars = allBars.filter(b => b.pop.id === pop.id);
-      if (popBars.length === 0) continue;
-      const preferred = memo.get(pop.id);
-      let slot: number;
-      if (preferred !== undefined && !slotConflicts(pop.id, popBars, preferred)) {
-        slot = preferred;
-      } else {
-        slot = 0;
-        while (slotConflicts(pop.id, popBars, slot)) slot++;
-      }
-      assignment.set(pop.id, slot);
-      for (const pb of popBars) pb.slot = slot;
-    }
-
-    // Persist this render's assignments so the next render keeps lanes stable across
-    // date drags. Prune entries for populations that no longer exist.
-    const next = new Map(memo);
-    for (const [id, slot] of assignment) next.set(id, slot);
-    const liveIds = new Set(populations.map(p => p.id));
-    for (const id of Array.from(next.keys())) if (!liveIds.has(id)) next.delete(id);
-    slotMemoByExperiment.set(experimentId, next);
-
-    const maxSlots = weeks.map((_, wi) => {
-      const bars = allBars.filter(b => b.weekIdx === wi);
-      return bars.length > 0 ? Math.max(...bars.map(b => b.slot)) + 1 : 0;
-    });
-    return { allBars, maxSlots };
-  }, [visiblePops, weeks, populations, experimentId]);
-
-  // Touch support: translate touch events to synthetic mouse-like coordinates
+  // ---------- Keyboard ----------
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const makeSynth = (t: Touch) => ({ clientX: t.clientX, clientY: t.clientY } as MouseEvent);
-    const onTouchMove = (e: TouchEvent) => {
-      if (longTapTimer.current) { clearTimeout(longTapTimer.current); longTapTimer.current = null; }
-      longTapPopId.current = null;
-      if (dragMode.current === 'none') return;
-      e.preventDefault();
-      dragMoved.current = true;
-      const dh = getDateHourFromGlobalMouse(makeSynth(e.touches[0]));
-      if (!dh) return;
-      // Reuse the same move logic for the active drag mode — dispatch a synthetic React mouse event
-      // Since we can't easily call handleGlobalMouseMove with a TouchEvent, duplicate the core date update
-      if (dragMode.current === 'create-pop') setDragEnd(dh.date);
-      if (dragMode.current === 'move-pop' && dragTargetId.current && dragAnchorDate.current) {
-        const dd = daysBetween(dragAnchorDate.current, dh.date);
-        if (dd !== 0) {
-          dragAnchorDate.current = dh.date;
-          const pid = dragTargetId.current;
-          setPopulations(prev => prev.map(p => p.id !== pid ? p : { ...p, startDate: addDays(p.startDate, dd), endDate: addDays(p.endDate, dd) }));
-          setEvents(prev => prev.map(ev => ev.populationId !== pid ? ev : { ...ev, startDate: addDays(ev.startDate, dd), endDate: addDays(ev.endDate, dd) }));
-        }
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const inField = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT';
+      if (e.key === 'Escape') {
+        if (editingFullPanel) { setEditingFullPanel(false); return; }
+        if (isolatedExperimentId) { setIsolatedExperimentId(null); setPopover(null); return; }
+        if (popover) { setPopover(null); return; }
       }
-      if (dragMode.current === 'move-event' && dragTargetId.current && dragAnchorDate.current) {
-        const eid = dragTargetId.current;
-        const ev = eventsRef.current.find(x => x.id === eid);
-        const pop = ev ? populationsRef.current.find(p => p.id === ev.populationId) : undefined;
-        if (!ev || !pop) return;
-        if (ev.allDay) {
-          const dd = daysBetween(dragAnchorDate.current, dh.date);
-          if (dd !== 0) {
-            dragAnchorDate.current = dh.date;
-            setEvents(prev => prev.map(x => {
-              if (x.id !== eid) return x;
-              const ns = addDays(x.startDate, dd); const ne = addDays(x.endDate, dd);
-              if (ns < pop.startDate || ne > pop.endDate) return x;
-              return { ...x, startDate: ns, endDate: ne };
-            }));
-          }
-        } else {
-          const hourDelta = daysBetween(dragAnchorDate.current, dh.date) * 24 + (dh.hour - dragAnchorHour.current);
-          if (hourDelta !== 0) {
-            dragAnchorDate.current = dh.date;
-            dragAnchorHour.current = dh.hour;
-            setEvents(prev => prev.map(x => {
-              if (x.id !== eid) return x;
-              const s = shiftDateHour(x.startDate, x.startHour, hourDelta);
-              const e2 = shiftDateHour(x.endDate, x.endHour, hourDelta);
-              if (s.date < pop.startDate || e2.date > pop.endDate) return x;
-              return { ...x, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
-            }));
-          }
+      if (!inField && (e.key === 'Backspace' || e.key === 'Delete')) {
+        if (popover?.kind === 'event') {
+          handleDeleteEvent(popover.id);
+          e.preventDefault();
+        } else if (popover?.kind === 'pop') {
+          handleDeletePopulation(popover.id);
+          e.preventDefault();
         }
       }
     };
-    const onTouchEnd = () => {
-      if (longTapTimer.current) { clearTimeout(longTapTimer.current); longTapTimer.current = null; }
-      longTapPopId.current = null;
-      handleMouseUp();
-    };
-    el.addEventListener('touchmove', onTouchMove, { passive: false });
-    el.addEventListener('touchend', onTouchEnd);
-    return () => { el.removeEventListener('touchmove', onTouchMove); el.removeEventListener('touchend', onTouchEnd); };
-  }, [getDateHourFromGlobalMouse, handleMouseUp]);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [popover, editingFullPanel, isolatedExperimentId, handleDeleteEvent, handleDeletePopulation]);
 
-  const selectedEvent = events.find(e => e.id === selectedEventId) || null;
-  const selectedPop = populations.find(p => p.id === selectedPopId) || null;
-  const todayStr = toDateStr(today);
-  const BAR_HEIGHT = 56;
-  const BAR_GAP = 4;
-  const BAR_V_OFFSET = 34;
-  const MIN_BAR_HEIGHT = 14;
-  const MIN_WEEK_HEIGHT = isMobile ? 60 : 110;
-  // Let the week row grow naturally to fit up to 4 full-height bars
-  // (34 + 4*(56+4) = 274 px); beyond that, bars compress instead of growing the row.
-  const MAX_WEEK_HEIGHT = BAR_V_OFFSET + 4 * (BAR_HEIGHT + BAR_GAP);
+  // ---------- Derived for popover/panel ----------
+  const popoverPop = popover ? populations.find(p => p.id === popover.popId) : null;
+  const popoverEv = popover?.kind === 'event' ? events.find(e => e.id === popover.id) : null;
+  const popoverEventCount = popoverPop ? events.filter(e => e.populationId === popoverPop.id).length : 0;
 
-  if (isMobile) {
-    return <MobileWeekView experimentId={experimentId} orientation={isLandscape ? 'landscape' : 'portrait'} syncStatus={syncStatus} />;
-  }
+  const fullPanelEvent = editingFullPanel && popover?.kind === 'event' ? popoverEv ?? null : null;
+  const fullPanelPop = editingFullPanel && popover?.kind === 'pop' ? popoverPop ?? null : null;
+
+  // Selected ids for visual state in Timeline
+  const selectedPopId = popover?.kind === 'pop' ? popover.id : (popover?.kind === 'event' ? popover.popId : null);
+  const selectedEventId = popover?.kind === 'event' ? popover.id : null;
 
   return (
-    <div
-      ref={containerRef}
-      className="flex-1 flex flex-col h-full"
-      onMouseMove={handleGlobalMouseMove}
-      onMouseUp={handleMouseUp}
-    >
-      <div className="border-b border-slate-200/80 bg-white flex items-center flex-shrink-0">
-        <CalendarHeader year={year} month={month} onPrev={goPrev} onNext={goNext} onToday={goToday} />
+    <div className="flex-1 flex flex-col h-full">
+      {/* Toolbar */}
+      <div className="border-b border-slate-200/80 bg-white flex items-center px-3 py-2 flex-shrink-0">
+        <button
+          className="text-xs font-bold text-indigo-600 px-2.5 py-1.5 rounded-lg hover:bg-indigo-50 transition-colors"
+          onClick={() => setScrollToTodayToken(t => t + 1)}
+        >
+          Today
+        </button>
+        <span className="ml-3 text-[11px] font-semibold text-slate-400 hidden sm:inline">
+          Drag empty space to create an experiment · click a bar to open it
+        </span>
         <SyncBadge status={syncStatus} />
       </div>
 
-      <div className={`flex-1 overflow-hidden ${isMobile ? 'flex flex-col' : 'relative'}`}>
-        <div className={`${isMobile ? 'flex-1 min-h-0' : 'h-full'} flex flex-col overflow-auto select-none bg-slate-50/50`}>
-          <div className="grid grid-cols-7 border-b border-slate-200 flex-shrink-0 bg-white">
-            {DAY_NAMES.map(d => (
-              <div key={d} className="text-center text-[13px] max-md:text-[11px] font-bold text-slate-400 uppercase tracking-widest py-3 max-md:py-2">{d}</div>
-            ))}
-          </div>
+      {/* Isolation toolbar (only when active) */}
+      {isolatedExperimentId && popoverPop && popoverPop.id === isolatedExperimentId && (
+        <IsolationToolbar
+          population={popoverPop}
+          eventCount={popoverEventCount}
+          onExit={() => setIsolatedExperimentId(null)}
+        />
+      )}
+      {isolatedExperimentId && (!popoverPop || popoverPop.id !== isolatedExperimentId) && (() => {
+        const isoPop = populations.find(p => p.id === isolatedExperimentId);
+        if (!isoPop) return null;
+        const count = events.filter(e => e.populationId === isolatedExperimentId).length;
+        return <IsolationToolbar population={isoPop} eventCount={count} onExit={() => setIsolatedExperimentId(null)} />;
+      })()}
 
-          <div className="flex-1 flex flex-col">
-            {weeks.map((week, wi) => {
-              const slotsInWeek = barLayout.maxSlots[wi];
-              const uncompressedHeight = BAR_V_OFFSET + slotsInWeek * (BAR_HEIGHT + BAR_GAP);
-              let weekMinHeight = Math.max(MIN_WEEK_HEIGHT, uncompressedHeight);
-              let barHeight = BAR_HEIGHT;
-              if (slotsInWeek > 0 && uncompressedHeight > MAX_WEEK_HEIGHT) {
-                weekMinHeight = MAX_WEEK_HEIGHT;
-                barHeight = Math.max(
-                  MIN_BAR_HEIGHT,
-                  Math.floor((MAX_WEEK_HEIGHT - BAR_V_OFFSET - slotsInWeek * BAR_GAP) / slotsInWeek),
-                );
-              }
-              return (
-                <div
-                  key={wi}
-                  ref={el => { weekRowRefs.current[wi] = el; }}
-                  data-week-row
-                  className="relative flex-1 border-b border-slate-100 last:border-b-0"
-                  style={{ minHeight: weekMinHeight }}
-                >
-                  <div className="grid grid-cols-7 absolute inset-0">
-                    {week.map((date) => {
-                      const dateStr = toDateStr(date);
-                      const isCurrentMonth = date.getMonth() === month;
-                      const isToday = dateStr === todayStr;
-                      const inDragRange = dragRange && !showNewDialog && isInRange(dateStr, dragRange.start, dragRange.end);
-                      return (
-                        <div
-                          key={dateStr}
-                          className={`
-                            border-r border-slate-100 last:border-r-0
-                            ${isCurrentMonth ? 'bg-white' : 'bg-slate-50/60'}
-                            ${inDragRange ? '!bg-indigo-50 !border-indigo-200' : ''}
-                          `}
-                          onMouseDown={(e) => handleCellMouseDown(dateStr, e)}
-                          onTouchStart={(e) => {
-                            const t = e.touches[0];
-                            if ((e.target as HTMLElement).closest('[data-bar]') || (e.target as HTMLElement).closest('[data-event-box]')) return;
-                            dragMode.current = 'create-pop'; dragMoved.current = false;
-                            setDragStart(dateStr); setDragEnd(dateStr);
-                          }}
-                        >
-                          <div className="px-2.5 pt-2 max-md:px-1 max-md:pt-1">
-                            <span className={`
-                              text-[15px] max-md:text-xs font-semibold inline-block w-8 h-8 max-md:w-6 max-md:h-6 text-center leading-8 max-md:leading-6 rounded-full
-                              ${isToday ? 'bg-indigo-600 text-white shadow-sm' : ''}
-                              ${!isCurrentMonth && !isToday ? 'text-slate-300' : ''}
-                              ${isCurrentMonth && !isToday ? 'text-slate-600' : ''}
-                            `}>
-                              {date.getDate()}
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+      {/* Timeline */}
+      <Timeline
+        axis={axis}
+        origin={origin}
+        dayCount={dayCount}
+        populations={populations}
+        events={events}
+        laneByPop={laneByPop}
+        totalLanes={totalLanes}
+        selectedPopId={selectedPopId}
+        selectedEventId={selectedEventId}
+        isolatedExperimentId={isolatedExperimentId}
+        todayStr={todayStr}
+        onCreatePop={handleCreatePop}
+        onMovePop={handleMovePop}
+        onResizePop={handleResizePop}
+        onSelectPop={handleSelectPop}
+        onCreateEvent={handleCreateEvent}
+        onMoveEvent={handleMoveEvent}
+        onResizeEvent={handleResizeEvent}
+        onSelectEvent={handleSelectEvent}
+        onDeselect={closePopover}
+        onLayoutChange={refreshPopoverAnchor}
+        scrollToTodayToken={scrollToTodayToken}
+      />
 
-                  {barLayout.allBars.filter(b => b.weekIdx === wi).map(bar => {
-                    const isSelected = bar.pop.id === selectedPopId && !selectedEventId;
-                    const weekStart = toDateStr(week[0]);
-                    const weekEnd = toDateStr(week[6]);
-                    // Outer (ext) bar geometry
-                    const leftPct = (bar.startFrac / 7) * 100;
-                    const widthPct = ((bar.endFrac - bar.startFrac) / 7) * 100;
-                    // Declared inner marker geometry — only meaningful when the pop's
-                    // declared range overlaps this week.
-                    const declaredInWeek = bar.decStartFrac !== null && bar.decEndFrac !== null;
-                    const decLeftInBar = declaredInWeek
-                      ? ((bar.decStartFrac! - bar.startFrac) / (bar.endFrac - bar.startFrac)) * 100
-                      : 0;
-                    const decWidthInBar = declaredInWeek
-                      ? ((bar.decEndFrac! - bar.decStartFrac!) / (bar.endFrac - bar.startFrac)) * 100
-                      : 0;
-                    const decContinuesLeft = bar.pop.startDate < weekStart;
-                    const decContinuesRight = bar.pop.endDate > weekEnd;
-                    const hasExt = bar.hasExtensionBefore || bar.hasExtensionAfter;
-
-                    // Event filter: include every event that overlaps the ext range.
-                    const barEvents = events.filter(ev =>
-                      ev.populationId === bar.pop.id &&
-                      rangesOverlap(ev.startDate, ev.endDate, bar.extStartDate, bar.extEndDate)
-                    );
-
-                    // Outer bar styling: faded + dashed border when extension exists.
-                    const outerBg = hasExt ? bar.pop.color + '08' : bar.pop.color + '12';
-                    const outerBorderColor = hasExt ? bar.pop.color + '55' : bar.pop.color + '80';
-                    const outerBorderStyle = hasExt ? 'dashed' : 'solid';
-
-                    return (
-                      <div
-                        key={`${bar.pop.id}-${wi}`}
-                        data-bar
-                        data-pop-id={bar.pop.id}
-                        className={`
-                          absolute cursor-grab active:cursor-grabbing overflow-visible z-10
-                          ${isSelected ? 'ring-2 ring-offset-2 ring-indigo-500 shadow-lg' : ''}
-                          ${bar.extIsBarStart ? 'rounded-l-xl' : ''} ${bar.extIsBarEnd ? 'rounded-r-xl' : ''}
-                        `}
-                        style={{
-                          top: BAR_V_OFFSET + bar.slot * (barHeight + BAR_GAP),
-                          left: `calc(${leftPct}% + 2px)`,
-                          width: `calc(${widthPct}% - 4px)`,
-                          height: barHeight,
-                          backgroundColor: outerBg,
-                          border: `2px ${outerBorderStyle} ${outerBorderColor}`,
-                          borderLeftStyle: bar.extIsBarStart ? outerBorderStyle : 'none',
-                          borderRightStyle: bar.extIsBarEnd ? outerBorderStyle : 'none',
-                        }}
-                        onMouseDown={(e) => {
-                          // Edge-aware: highlighted bar + click near the declared edge
-                          // triggers a resize; otherwise fall through to move-prep.
-                          if ((e.target as HTMLElement).closest('[data-event-box]')) return;
-                          const isHighlighted = selectedPopId === bar.pop.id && !selectedEventId;
-                          if (isHighlighted && declaredInWeek) {
-                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                            const xInBar = e.clientX - rect.left;
-                            const edgeThresh = Math.min(15, rect.width * 0.15);
-                            const decLeftPx = (decLeftInBar / 100) * rect.width;
-                            const decRightPx = ((decLeftInBar + decWidthInBar) / 100) * rect.width;
-                            const nearLeft = !decContinuesLeft && Math.abs(xInBar - decLeftPx) < edgeThresh;
-                            const nearRight = !decContinuesRight && Math.abs(xInBar - decRightPx) < edgeThresh;
-                            if (nearLeft) { handleResizePopStart(bar.pop.id, e); return; }
-                            if (nearRight) { handleResizePopEnd(bar.pop.id, e); return; }
-                          }
-                          handleBarMouseDown(bar.pop.id, e);
-                        }}
-                        onTouchStart={(e) => {
-                          if ((e.target as HTMLElement).closest('[data-event-box]')) return;
-                          const t = e.touches[0];
-                          const dh = getDateHourFromGlobalMouse({ clientX: t.clientX, clientY: t.clientY } as MouseEvent);
-                          if (!dh) return;
-                          // Set up move drag
-                          dragMode.current = 'move-pop'; dragMoved.current = false; dragDuplicated.current = false;
-                          dragTargetId.current = bar.pop.id; dragAnchorDate.current = dh.date; dragAnchorHour.current = dh.hour;
-                          // Long-press: create 4h event if held LONG_PRESS_MS without moving
-                          longTapPopId.current = bar.pop.id;
-                          if (longTapTimer.current) clearTimeout(longTapTimer.current);
-                          longTapTimer.current = setTimeout(() => {
-                            longTapTimer.current = null;
-                            if (!dragMoved.current && longTapPopId.current) {
-                              dragMode.current = 'none';
-                              createEventAt(longTapPopId.current, dh.date, dh.hour);
-                              longTapPopId.current = null;
-                            }
-                          }, LONG_PRESS_MS);
-                        }}
-                        onClick={(e) => handleBarClick(bar.pop.id, e)}
-                        onDoubleClick={(e) => handleBarDoubleClick(bar.pop.id, e)}
-                      >
-                        {/* Declared inner rectangle — shows the experiment's actual
-                            bounds when the outer bar is extended past them. */}
-                        {hasExt && declaredInWeek && (
-                          <div
-                            className="absolute pointer-events-none"
-                            style={{
-                              top: 0,
-                              bottom: 0,
-                              left: `${decLeftInBar}%`,
-                              width: `${decWidthInBar}%`,
-                              backgroundColor: bar.pop.color + '12',
-                              border: `2px solid ${bar.pop.color}80`,
-                              borderLeftStyle: decContinuesLeft ? 'none' : 'solid',
-                              borderRightStyle: decContinuesRight ? 'none' : 'solid',
-                              borderTopLeftRadius: decContinuesLeft ? 0 : 8,
-                              borderBottomLeftRadius: decContinuesLeft ? 0 : 8,
-                              borderTopRightRadius: decContinuesRight ? 0 : 8,
-                              borderBottomRightRadius: decContinuesRight ? 0 : 8,
-                            }}
-                          />
-                        )}
-
-                        {declaredInWeek && !decContinuesLeft && (
-                          <div
-                            className="absolute top-0 bottom-0 flex flex-col justify-center px-3 max-md:px-1.5 pointer-events-none overflow-hidden"
-                            style={{
-                              left: `${decLeftInBar}%`,
-                              width: `${decWidthInBar}%`,
-                            }}
-                          >
-                            <span className="text-[14px] max-md:text-[11px] font-bold truncate leading-tight" style={{ color: bar.pop.color }}>
-                              {platesLabel(bar.pop.plateType, bar.pop.plateCount)}
-                            </span>
-                            <span className="text-[12px] max-md:text-[10px] font-semibold truncate leading-tight opacity-80" style={{ color: bar.pop.color }}>
-                              {bar.pop.name}
-                              {bar.pop.cellDensity && <span className="opacity-70 font-medium"> · {bar.pop.cellDensity} {densityUnit(bar.pop.plateType)}</span>}
-                            </span>
-                          </div>
-                        )}
-
-                        {barEvents.map(ev => {
-                          // Position event relative to the outer (ext) bar range.
-                          const extStartHour = (bar.extIsBarStart && bar.extStartDate === bar.pop.startDate) ? bar.pop.startHour : 0;
-                          const extEndHour = (bar.extIsBarEnd && bar.extEndDate === bar.pop.endDate) ? bar.pop.endHour : 23;
-                          const evStartDate = ev.startDate < bar.extStartDate ? bar.extStartDate : ev.startDate;
-                          const evEndDate = ev.endDate > bar.extEndDate ? bar.extEndDate : ev.endDate;
-                          const evStartHour = ev.startDate < bar.extStartDate ? 0 : ev.startHour;
-                          const evEndHour = ev.endDate > bar.extEndDate ? 23 : ev.endHour;
-                          const barStartAbs = extStartHour / 24;
-                          const barEndAbs = daysBetween(bar.extStartDate, bar.extEndDate) + (extEndHour + 1) / 24;
-                          const evStartAbs = daysBetween(bar.extStartDate, evStartDate) + evStartHour / 24;
-                          const evEndAbs = daysBetween(bar.extStartDate, evEndDate) + (evEndHour + 1) / 24;
-                          const barRange = barEndAbs - barStartAbs;
-                          const evLeftPct = barRange > 0 ? ((evStartAbs - barStartAbs) / barRange) * 100 : 0;
-                          const evWidthPct = barRange > 0 ? ((evEndAbs - evStartAbs) / barRange) * 100 : 100;
-                          const isEvSelected = selectedEventId === ev.id;
-
-                          return (
-                            <div
-                              key={ev.id}
-                              data-event-box
-                              className={`
-                                absolute top-[4px] bottom-[4px] rounded-lg cursor-grab active:cursor-grabbing
-                                flex items-center justify-center
-                                ${isEvSelected ? 'ring-2 ring-white ring-offset-1 shadow-lg scale-[1.01]' : 'shadow'}
-                              `}
-                              style={{ left: `${evLeftPct}%`, width: `${evWidthPct}%`, backgroundColor: ev.color + 'e0', backdropFilter: 'blur(2px)' }}
-                              onClick={(e) => handleEventClick(ev.id, ev.populationId, e)}
-                              onDoubleClick={(e) => handleEventDoubleClick(ev.id, ev.populationId, e)}
-                              onMouseDown={(e) => handleEventMouseDown(ev.id, e)}
-                            >
-                              <span className="text-[13px] font-bold text-white truncate px-2 drop-shadow-sm pointer-events-none">{displayEventLabel(ev)}</span>
-                              <div data-resize className="absolute left-0 top-0 bottom-0 w-3 cursor-col-resize hover:bg-white/30 rounded-l-lg"
-                                onMouseDown={(e) => handleResizeEventStart(ev.id, e)} />
-                              <div data-resize className="absolute right-0 top-0 bottom-0 w-3 cursor-col-resize hover:bg-white/30 rounded-r-lg"
-                                onMouseDown={(e) => handleResizeEventEnd(ev.id, e)} />
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Panel: floating on desktop, inline below calendar on mobile */}
-        {panelVisible && (selectedEvent || (selectedPop && !selectedEvent)) && (
-          <EventPanel
-            subEvent={selectedEvent}
-            population={selectedPop}
-            allEvents={events}
-            onUpdateSubEvent={handleUpdateEvent}
-            onDeleteSubEvent={handleDeleteEvent}
-            onUpdatePopulation={handleUpdatePopulation}
-            onDeletePopulation={handleDeletePopulation}
-            onRepeatNextWeek={handleRepeatNextWeek}
-            onClose={() => { setPanelVisible(false); }}
+      {/* Compact popover */}
+      {popover && !editingFullPanel && popoverPop && (
+        popover.kind === 'pop' ? (
+          <ExperimentPopover
+            kind="pop"
+            anchor={popover.anchor}
             isMobile={isMobile}
+            population={popoverPop}
+            eventCount={popoverEventCount}
+            onEnterIsolation={() => { setIsolatedExperimentId(popover.popId); setPopover(null); }}
+            onEditDetails={() => setEditingFullPanel(true)}
+            onDelete={() => handleDeletePopulation(popover.popId)}
+            onClose={closePopover}
           />
-        )}
-      </div>
-
-      {dragRange && !showNewDialog && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-800 text-white px-6 py-3 rounded-2xl text-sm font-semibold shadow-xl z-50 backdrop-blur-sm">
-          {dragRange.start} &rarr; {dragRange.end}
-        </div>
+        ) : popoverEv ? (
+          <ExperimentPopover
+            kind="event"
+            anchor={popover.anchor}
+            isMobile={isMobile}
+            subEvent={popoverEv}
+            onEditDetails={() => setEditingFullPanel(true)}
+            onDelete={() => handleDeleteEvent(popover.id)}
+            onClose={closePopover}
+          />
+        ) : null
       )}
 
-      {showNewDialog && dragRange && (
+      {/* Full inspector (only when explicitly requested) */}
+      {editingFullPanel && (fullPanelEvent || fullPanelPop) && (
+        <EventPanel
+          subEvent={fullPanelEvent}
+          population={fullPanelPop}
+          allEvents={events}
+          onUpdateSubEvent={handleUpdateEvent}
+          onDeleteSubEvent={handleDeleteEvent}
+          onUpdatePopulation={handleUpdatePopulation}
+          onDeletePopulation={handleDeletePopulation}
+          onRepeatNextWeek={handleRepeatNextWeek}
+          onClose={() => setEditingFullPanel(false)}
+          isMobile={isMobile}
+        />
+      )}
+
+      {/* New experiment dialog */}
+      {showNewDialog && newDialogRange && (
         <NewPopulationDialog
-          startDate={dragRange.start}
-          endDate={dragRange.end}
-          onConfirm={handleCreatePopulation}
-          onCancel={handleCancelDialog}
+          startDate={newDialogRange.start}
+          endDate={newDialogRange.end}
+          onConfirm={handleConfirmNewPop}
+          onCancel={handleCancelNewPop}
         />
       )}
 
       {populations.length === 0 && (
         <div className="absolute bottom-10 left-1/2 -translate-x-1/2 text-slate-400 text-base pointer-events-none flex flex-col items-center gap-2">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-slate-300"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-          <span>Click and drag across days to create an experiment</span>
+          <span>Drag across days to create an experiment</span>
         </div>
       )}
     </div>
   );
-}
-
-function daysBetween(a: string, b: string): number {
-  const [ay, am, ad] = a.split('-').map(Number);
-  const [by, bm, bd] = b.split('-').map(Number);
-  return Math.round((new Date(by, bm - 1, bd).getTime() - new Date(ay, am - 1, ad).getTime()) / 86400000);
 }
 
 export function SyncBadge({ status }: { status: string }) {
@@ -1226,6 +503,6 @@ export function SyncBadge({ status }: { status: string }) {
     offline: { label: 'Offline', color: 'text-slate-500 bg-slate-100' },
   }[status as 'idle' | 'syncing' | 'error' | 'offline'] ?? { label: status, color: 'text-slate-500 bg-slate-100' };
   return (
-    <span className={`ml-auto mr-4 text-[11px] font-semibold px-2 py-0.5 rounded-full ${cfg.color}`}>{cfg.label}</span>
+    <span className={`ml-auto text-[11px] font-semibold px-2 py-0.5 rounded-full ${cfg.color}`}>{cfg.label}</span>
   );
 }
