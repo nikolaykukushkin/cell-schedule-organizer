@@ -43,13 +43,22 @@ export interface TimelineProps {
   onMovePop: (popId: string, dayDelta: number) => void;
   onResizePop: (popId: string, edge: 'start' | 'end', date: string, hour: number) => void;
   onSelectPop: (popId: string, anchor: DOMRect) => void;
+  onSetPopLane: (popId: string, lane: number) => void;
+  onDuplicatePop: (popId: string) => string | null;
+  onOpenPopDetails: (popId: string) => void;
 
   onCreateEvent: (popId: string, startDate: string, startHour: number, endDate: string, endHour: number) => void;
   onMoveEvent: (evId: string, hourDelta: number) => void;
   onResizeEvent: (evId: string, edge: 'start' | 'end', date: string, hour: number) => void;
   onSelectEvent: (evId: string, popId: string, anchor: DOMRect) => void;
+  onDuplicateEvent: (evId: string) => string | null;
+  onOpenEventDetails: (evId: string, popId: string) => void;
+  /** Move an event into a different parent population, preserving its duration and
+   *  placing its start at the given date/hour. */
+  onReparentEvent: (evId: string, newPopId: string, anchorDate: string, anchorHour: number) => void;
 
   onDeselect: () => void;
+  onExitIsolation: () => void;
 
   /** Hook: recompute popover anchor when layout shifts (scroll, resize, drag). */
   onLayoutChange?: () => void;
@@ -123,8 +132,10 @@ export default function Timeline(props: TimelineProps) {
     laneByPop, totalLanes,
     selectedPopId, selectedEventId, isolatedExperimentId, todayStr,
     onCreatePop, onMovePop, onResizePop, onSelectPop,
+    onSetPopLane, onDuplicatePop, onOpenPopDetails,
     onCreateEvent, onMoveEvent, onResizeEvent, onSelectEvent,
-    onDeselect, onLayoutChange,
+    onDuplicateEvent, onOpenEventDetails, onReparentEvent,
+    onDeselect, onExitIsolation, onLayoutChange,
     scrollToTodayToken,
   } = props;
 
@@ -140,7 +151,8 @@ export default function Timeline(props: TimelineProps) {
 
   // Total content size along the time axis (scroll length)
   const timeAxisPx = dayCount * geom.dayPx;
-  // Cross-axis size
+  // Cross-axis content size (just the populated lanes). The lane area itself spans
+  // the full viewport minus the header so grid lines extend all the way to the edge.
   const crossAxisPx = Math.max(1, totalLanes) * (geom.lanePx + geom.laneGap) + geom.laneGap;
 
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -165,6 +177,16 @@ export default function Timeline(props: TimelineProps) {
     const hour = Math.min(23, Math.max(0, Math.floor(fracInDay * 24)));
     return { date: addDays(origin, dayIndex), hour };
   }, [axis, dayCount, geom.dayPx, origin]);
+
+  // Cross-axis pointer position → lane index (used for vertical drag-reorder).
+  const clientToLane = useCallback((clientX: number, clientY: number): number => {
+    const el = laneAreaRef.current;
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    const posCross = axis === 'horizontal' ? clientY - rect.top : clientX - rect.left;
+    const lane = Math.floor((posCross - geom.laneGap) / (geom.lanePx + geom.laneGap));
+    return Math.max(0, lane);
+  }, [axis, geom.lanePx, geom.laneGap]);
 
   // --- Auto-scroll to today on mount + on scrollToTodayToken change ---
   const didScrollRef = useRef(false);
@@ -204,7 +226,9 @@ export default function Timeline(props: TimelineProps) {
   // --- Pointer event handling (unified for mouse + touch) ---
 
   // Compute drag mode from a pointerdown event target.
-  const resolveDragIntent = useCallback((target: HTMLElement, dh: { date: string; hour: number }): DragMode => {
+  // `mods.meta` (cmd / ctrl) overrides the event-passivity lock outside isolation —
+  // letting the user grab an event without first entering isolation mode.
+  const resolveDragIntent = useCallback((target: HTMLElement, dh: { date: string; hour: number }, mods: { meta: boolean }): DragMode => {
     const resizeEl = target.closest('[data-resize]') as HTMLElement | null;
     if (resizeEl) {
       const kind = resizeEl.getAttribute('data-resize') || '';
@@ -219,8 +243,15 @@ export default function Timeline(props: TimelineProps) {
     }
 
     const evEl = target.closest('[data-ev-id]') as HTMLElement | null;
-    if (evEl && isolatedExperimentId && evEl.dataset.popId === isolatedExperimentId) {
-      return { kind: 'pending-click-event', evId: evEl.dataset.evId!, popId: evEl.dataset.popId! };
+    if (evEl) {
+      const evPopId = evEl.dataset.popId!;
+      const inIsoBar = isolatedExperimentId && evPopId === isolatedExperimentId;
+      const cmdOverride = !isolatedExperimentId && mods.meta;
+      if (inIsoBar || cmdOverride) {
+        return { kind: 'pending-click-event', evId: evEl.dataset.evId!, popId: evPopId };
+      }
+      // Else fall through: outside isolation without cmd, the click is treated as a
+      // click on the parent bar (preserves the previous "events are passive" feel).
     }
 
     const popEl = target.closest('[data-pop-id]') as HTMLElement | null;
@@ -254,10 +285,22 @@ export default function Timeline(props: TimelineProps) {
     const target = e.target as HTMLElement;
     const dh = clientToDH(e.clientX, e.clientY);
     if (!dh) return;
-    const intent = resolveDragIntent(target, dh);
+    const meta = e.metaKey || e.ctrlKey;
+    let intent = resolveDragIntent(target, dh, { meta });
     if (intent.kind === 'none') {
       onDeselect();
       return;
+    }
+
+    // Option-drag duplicates whatever you're grabbing — uniform across bars and events.
+    // (Cmd is reserved as the "override-passivity" modifier and doesn't duplicate.)
+    if (intent.kind === 'pending-click-pop' && e.altKey) {
+      const newId = onDuplicatePop(intent.popId);
+      if (newId) intent = { kind: 'pending-click-pop', popId: newId };
+    }
+    if (intent.kind === 'pending-click-event' && e.altKey) {
+      const newId = onDuplicateEvent(intent.evId);
+      if (newId) intent = { kind: 'pending-click-event', evId: newId, popId: intent.popId };
     }
 
     const isTouch = e.pointerType === 'touch';
@@ -305,19 +348,14 @@ export default function Timeline(props: TimelineProps) {
         }
       }, LONG_PRESS_MS);
     } else {
-      // Mouse: pending-click stays pending until first move; create-pop / create-event begin tracking immediately.
+      // Mouse: gestures stay pending until the pointer actually moves past slop.
+      // (Previously a click on empty space immediately created a 1-day experiment;
+      // now creation requires an actual drag, with double-click providing a fast path.)
       try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
-      if (intent.kind === 'create-pop') {
-        state.active = true;
-        setDragPreview({ kind: 'pop', startDate: dh.date, startHour: dh.hour, endDate: dh.date, endHour: dh.hour });
-      } else if (intent.kind === 'create-event') {
-        state.active = true;
-        setDragPreview({ kind: 'event', popId: intent.popId, startDate: dh.date, startHour: dh.hour, endDate: dh.date, endHour: dh.hour });
-      }
     }
 
     dragRef.current = state;
-  }, [clientToDH, resolveDragIntent, onDeselect]);
+  }, [clientToDH, resolveDragIntent, onDeselect, onDuplicatePop, onDuplicateEvent]);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     const st = dragRef.current;
@@ -345,6 +383,16 @@ export default function Timeline(props: TimelineProps) {
       }
       st.active = true;
     }
+    // Mouse on empty space / inside-isolated-bar that just moved: escalate to create-pop / create-event
+    if (st.pointerType !== 'touch' && (st.mode.kind === 'create-pop' || st.mode.kind === 'create-event') && moved && !st.active) {
+      st.active = true;
+      const sd = st.startDH;
+      if (st.mode.kind === 'create-pop') {
+        setDragPreview({ kind: 'pop', startDate: sd.date, startHour: sd.hour, endDate: sd.date, endHour: sd.hour });
+      } else {
+        setDragPreview({ kind: 'event', popId: st.mode.popId, startDate: sd.date, startHour: sd.hour, endDate: sd.date, endHour: sd.hour });
+      }
+    }
 
     if (!st.active) return;
     st.moved = moved || st.moved;
@@ -370,19 +418,39 @@ export default function Timeline(props: TimelineProps) {
         st.anchorDate = dh.date;
         onMovePop(m.popId, dayDelta);
       }
+      const targetLane = clientToLane(e.clientX, e.clientY);
+      const currentLane = laneByPop.get(m.popId) ?? 0;
+      if (targetLane !== currentLane) onSetPopLane(m.popId, targetLane);
     } else if (m.kind === 'move-event') {
-      const hourDelta = daysBetween(st.anchorDate, dh.date) * 24 + (dh.hour - st.anchorHour);
-      if (hourDelta !== 0) {
-        st.anchorDate = dh.date;
-        st.anchorHour = dh.hour;
-        onMoveEvent(m.evId, hourDelta);
+      // Detect whether the cursor is over a different parent bar — if so, reparent.
+      // Skip in isolation mode (only the iso bar is interactive).
+      let reparented = false;
+      if (!isolatedExperimentId) {
+        const elAt = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+        const popEl = elAt?.closest('[data-pop-id]') as HTMLElement | null;
+        const targetPopId = popEl?.dataset.popId;
+        if (targetPopId && targetPopId !== m.popId) {
+          onReparentEvent(m.evId, targetPopId, dh.date, dh.hour);
+          m.popId = targetPopId;
+          st.anchorDate = dh.date;
+          st.anchorHour = dh.hour;
+          reparented = true;
+        }
+      }
+      if (!reparented) {
+        const hourDelta = daysBetween(st.anchorDate, dh.date) * 24 + (dh.hour - st.anchorHour);
+        if (hourDelta !== 0) {
+          st.anchorDate = dh.date;
+          st.anchorHour = dh.hour;
+          onMoveEvent(m.evId, hourDelta);
+        }
       }
     } else if (m.kind === 'resize-pop') {
       onResizePop(m.popId, m.edge, dh.date, dh.hour);
     } else if (m.kind === 'resize-event') {
       onResizeEvent(m.evId, m.edge, dh.date, dh.hour);
     }
-  }, [clientToDH, onMovePop, onMoveEvent, onResizePop, onResizeEvent]);
+  }, [clientToDH, clientToLane, isolatedExperimentId, laneByPop, onMovePop, onMoveEvent, onResizePop, onResizeEvent, onSetPopLane, onReparentEvent]);
 
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     const st = dragRef.current;
@@ -394,10 +462,13 @@ export default function Timeline(props: TimelineProps) {
     if (st.active) {
       const dh = st.currentDH;
       if (m.kind === 'create-pop') {
-        const sd = st.startDH;
-        const a = sd.date <= dh.date ? sd.date : dh.date;
-        const b = sd.date <= dh.date ? dh.date : sd.date;
-        onCreatePop(a, b);
+        // Only create on real drag — single click on empty space is a no-op now.
+        if (st.moved) {
+          const sd = st.startDH;
+          const a = sd.date <= dh.date ? sd.date : dh.date;
+          const b = sd.date <= dh.date ? dh.date : sd.date;
+          onCreatePop(a, b);
+        }
       } else if (m.kind === 'create-event') {
         const sd = st.startDH;
         const aDate = sd.date < dh.date || (sd.date === dh.date && sd.hour <= dh.hour) ? sd.date : dh.date;
@@ -413,7 +484,7 @@ export default function Timeline(props: TimelineProps) {
         onCreateEvent(m.popId, aDate, aHour, endDate, endHour);
       }
     } else {
-      // Tap / click without movement → select
+      // Tap / click without movement → select, or deselect on blank canvas.
       const target = st.pendingTargetEl;
       if (target) {
         if (m.kind === 'pending-click-pop' || m.kind === 'move-pop') {
@@ -425,17 +496,62 @@ export default function Timeline(props: TimelineProps) {
           const popId = m.popId;
           const evEl = target.closest('[data-ev-id]') as HTMLElement | null;
           if (evEl) onSelectEvent(evId, popId, evEl.getBoundingClientRect());
+        } else if (m.kind === 'create-pop' || m.kind === 'create-event') {
+          // Click on empty canvas (no drag) → tear down any open popover or details.
+          onDeselect();
         }
       }
     }
 
     setDragPreview(null);
     dragRef.current = null;
-  }, [onCreatePop, onCreateEvent, onSelectPop, onSelectEvent]);
+  }, [onCreatePop, onCreateEvent, onSelectPop, onSelectEvent, onDeselect]);
 
   const onPointerCancel = useCallback(() => {
     cancelDrag();
   }, [cancelDrag]);
+
+  const onDoubleClick = useCallback((e: React.MouseEvent) => {
+    // Pointer capture during the click sequence can leave `e.target` pointing at the
+    // lane area instead of the bar/event under the cursor — so look up the real element
+    // by point and walk up from there.
+    const fromTarget = e.target as HTMLElement;
+    const fromPoint = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const candidates = [fromPoint, fromTarget].filter(Boolean) as HTMLElement[];
+    const findClosest = (sel: string) => {
+      for (const c of candidates) {
+        const hit = c.closest(sel) as HTMLElement | null;
+        if (hit) return hit;
+      }
+      return null;
+    };
+
+    if (findClosest('[data-resize]')) return;
+
+    const evEl = findClosest('[data-ev-id]');
+    if (evEl && isolatedExperimentId && evEl.dataset.popId === isolatedExperimentId) {
+      onOpenEventDetails(evEl.dataset.evId!, evEl.dataset.popId!);
+      return;
+    }
+
+    const popEl = findClosest('[data-pop-id]');
+    if (popEl) {
+      // Don't trigger details when double-clicking the interior of an isolated bar
+      // (that area is reserved for event creation).
+      if (isolatedExperimentId && popEl.dataset.popId === isolatedExperimentId) return;
+      onOpenPopDetails(popEl.dataset.popId!);
+      return;
+    }
+
+    if (isolatedExperimentId) {
+      // Empty area outside the isolated bar → exit isolation.
+      onExitIsolation();
+      return;
+    }
+    const dh = clientToDH(e.clientX, e.clientY);
+    if (!dh) return;
+    onCreatePop(dh.date, dh.date);
+  }, [clientToDH, isolatedExperimentId, onCreatePop, onExitIsolation, onOpenEventDetails, onOpenPopDetails]);
 
   // --- Pixel layout helpers ---
   const dateHourToPx = useCallback((date: string, hour: number) => {
@@ -537,29 +653,31 @@ export default function Timeline(props: TimelineProps) {
             ))}
           </div>
 
-          {/* Lane area */}
+          {/* Lane area — extends to the far edge of the viewport so grid lines aren't
+              clipped at the last populated lane. */}
           <div
             ref={laneAreaRef}
             className="absolute select-none"
             style={
               isHoriz
-                ? { top: geom.headerPx, left: 0, width: timeAxisPx, height: crossAxisPx }
-                : { left: geom.headerPx, top: 0, height: timeAxisPx, width: crossAxisPx }
+                ? { top: geom.headerPx, left: 0, width: timeAxisPx, bottom: 0, minHeight: crossAxisPx }
+                : { left: geom.headerPx, top: 0, height: timeAxisPx, right: 0, minWidth: crossAxisPx }
             }
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerCancel}
+            onDoubleClick={onDoubleClick}
           >
             {/* Day grid lines */}
             {dayTicks.map(t => (
               <div
                 key={t.date}
-                className={`absolute ${t.isWeekend ? 'bg-slate-100/60' : ''} ${t.isMonthStart ? 'border-indigo-200/60' : 'border-slate-100'}`}
+                className={`absolute ${t.isWeekend ? 'bg-slate-200/55' : ''}`}
                 style={
                   isHoriz
-                    ? { left: t.px, top: 0, width: geom.dayPx, height: '100%', borderLeft: t.isMonthStart ? '2px solid' : '1px solid', borderColor: t.isMonthStart ? 'rgb(199 210 254 / 0.6)' : 'rgb(241 245 249)' }
-                    : { top: t.px, left: 0, height: geom.dayPx, width: '100%', borderTop: t.isMonthStart ? '2px solid' : '1px solid', borderColor: t.isMonthStart ? 'rgb(199 210 254 / 0.6)' : 'rgb(241 245 249)' }
+                    ? { left: t.px, top: 0, width: geom.dayPx, height: '100%', borderLeft: t.isMonthStart ? '2px solid' : '1px solid', borderColor: t.isMonthStart ? 'rgb(129 140 248 / 0.55)' : 'rgb(203 213 225 / 0.85)' }
+                    : { top: t.px, left: 0, height: geom.dayPx, width: '100%', borderTop: t.isMonthStart ? '2px solid' : '1px solid', borderColor: t.isMonthStart ? 'rgb(129 140 248 / 0.55)' : 'rgb(203 213 225 / 0.85)' }
                 }
               />
             ))}
@@ -684,6 +802,10 @@ export default function Timeline(props: TimelineProps) {
                     if (widthPct <= 0) return null;
                     const isEvSelected = selectedEventId === ev.id;
                     const interactive = isIsolated;
+                    // Outside isolation, events still accept pointer events so cmd-drag
+                    // can grab them — but only events on the iso bar (in iso mode) get
+                    // visible resize handles.
+                    const pointerActive = !isolatedExperimentId || isIsolated;
 
                     const evStyle: React.CSSProperties = isHoriz
                       ? { left: `${startPct}%`, width: `${widthPct}%`, top: 4, bottom: 4 }
@@ -694,7 +816,7 @@ export default function Timeline(props: TimelineProps) {
                         key={ev.id}
                         data-ev-id={ev.id}
                         data-pop-id={pop.id}
-                        className={`absolute rounded-md flex items-center justify-center ${isEvSelected ? 'ring-2 ring-white ring-offset-1 shadow-lg' : 'shadow'} ${interactive ? 'cursor-grab active:cursor-grabbing' : 'pointer-events-none'}`}
+                        className={`absolute rounded-md flex items-center justify-center cursor-grab active:cursor-grabbing ${isEvSelected ? 'ring-2 ring-white ring-offset-1 shadow-lg' : 'shadow'} ${pointerActive ? '' : 'pointer-events-none'}`}
                         style={{
                           ...evStyle,
                           backgroundColor: ev.color + (interactive ? 'e0' : 'b0'),

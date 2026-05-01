@@ -141,3 +141,59 @@ export function getAllExperimentNames(): string[] {
   const names = all.map(p => p.name).filter(Boolean);
   return [...new Set(names)];
 }
+
+/** Distinct colors currently used by populations, ordered by frequency (most used first). */
+export function getAllPopulationColors(): string[] {
+  const all = getItems<CellPopulation>(POPULATIONS_KEY);
+  const counts = new Map<string, number>();
+  for (const p of all) if (p.color) counts.set(p.color, (counts.get(p.color) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c);
+}
+
+/** Distinct colors currently used by sub-events, ordered by frequency. */
+export function getAllSubEventColors(): string[] {
+  const all = getItems<SubEvent>(SUBEVENTS_KEY);
+  const counts = new Map<string, number>();
+  for (const e of all) if (e.color) counts.set(e.color, (counts.get(e.color) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c);
+}
+
+/** Existing sub-event templates, one per distinct label. Color, duration, and
+ *  offset-from-parent-end come from the most-recent occurrence. Returned in
+ *  most-recent-first order so the dropdown surfaces what the user just used.
+ *  `offsetFromEndH` is the gap (in hours) from the source event's end to its parent's
+ *  end — used to anchor newly-pasted instances at the same relative position. */
+export function getAllSubEventTemplates(): { label: string; color: string; durationH: number; offsetFromEndH: number }[] {
+  const all = getItems<SubEvent>(SUBEVENTS_KEY);
+  const populations = new Map<string, CellPopulation>(
+    getItems<CellPopulation>(POPULATIONS_KEY).map(p => [p.id, p])
+  );
+  const absHours = (date: string, hour: number): number => {
+    const [y, m, d] = date.split('-').map(Number);
+    return Math.round(new Date(y, m - 1, d).getTime() / 3600_000) + hour;
+  };
+  const byLabel = new Map<string, SubEvent>();
+  for (const e of all) {
+    const label = (e.label || '').trim();
+    if (!label) continue;
+    const existing = byLabel.get(label);
+    const isNewer = !existing
+      || e.startDate > existing.startDate
+      || (e.startDate === existing.startDate && e.startHour > existing.startHour);
+    if (isNewer) byLabel.set(label, e);
+  }
+  const arr = [...byLabel.values()].sort((a, b) => {
+    if (a.startDate !== b.startDate) return a.startDate < b.startDate ? 1 : -1;
+    return b.startHour - a.startHour;
+  });
+  return arr.map(e => {
+    const startAbs = absHours(e.startDate, e.startHour);
+    const endAbs = absHours(e.endDate, e.endHour);
+    const durationH = Math.max(1, endAbs - startAbs + 1);
+    const parent = populations.get(e.populationId);
+    const offsetFromEndH = parent
+      ? Math.max(0, absHours(parent.endDate, parent.endHour) - endAbs)
+      : 0;
+    return { label: e.label.trim(), color: e.color, durationH, offsetFromEndH };
+  });
+}

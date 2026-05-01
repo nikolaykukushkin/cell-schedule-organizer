@@ -49,6 +49,9 @@ interface EventPanelProps {
   onUpdatePopulation: (pop: CellPopulation) => void;
   onDeletePopulation: (id: string) => void;
   onRepeatNextWeek: (popId: string) => void;
+  onEnterIsolation: (popId: string) => void;
+  onAddQuickEvent: (popId: string, label: string, color: string, durationH: number, offsetFromEndH: number) => void;
+  eventTemplates: { label: string; color: string; durationH: number; offsetFromEndH: number }[];
   onClose: () => void;
   isMobile: boolean;
 }
@@ -89,6 +92,41 @@ function Input({ ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
   );
 }
 
+function ColorPicker({ value, onChange, palette }: { value: string; onChange: (c: string) => void; palette: string[] }) {
+  // De-duplicate while preserving order; ensure the current value is always offered.
+  const seen = new Set<string>();
+  const swatches: string[] = [];
+  for (const c of [...palette, value]) {
+    if (!c) continue;
+    const lower = c.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    swatches.push(c);
+  }
+  return (
+    <div className="space-y-2">
+      {swatches.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {swatches.map(c => {
+            const selected = c.toLowerCase() === (value || '').toLowerCase();
+            return (
+              <button
+                key={c}
+                type="button"
+                onClick={() => onChange(c)}
+                aria-label={`Use color ${c}`}
+                className={`w-6 h-6 rounded-full border-2 transition-transform ${selected ? 'border-slate-700 scale-110' : 'border-white shadow-sm hover:scale-105'}`}
+                style={{ backgroundColor: c, boxShadow: selected ? '0 0 0 2px rgb(99 102 241 / 0.4)' : undefined }}
+              />
+            );
+          })}
+        </div>
+      )}
+      <input type="color" value={value} onChange={e => onChange(e.target.value)} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
+    </div>
+  );
+}
+
 export default function EventPanel({
   subEvent,
   population,
@@ -98,6 +136,9 @@ export default function EventPanel({
   onUpdatePopulation,
   onDeletePopulation,
   onRepeatNextWeek,
+  onEnterIsolation,
+  onAddQuickEvent,
+  eventTemplates,
   onClose,
   isMobile,
 }: EventPanelProps) {
@@ -200,7 +241,7 @@ export default function EventPanel({
           </div>
           <div>
             <Label>Color</Label>
-            <input type="color" value={localEvent.color} onChange={e => setLocalEvent({ ...localEvent, color: e.target.value })} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
+            <ColorPicker value={localEvent.color} onChange={c => setLocalEvent({ ...localEvent, color: c })} palette={storage.getAllSubEventColors()} />
           </div>
           <div className="pt-1 space-y-2">
             <button onClick={onClose} className="w-full px-3 py-2.5 rounded-lg text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-sm">
@@ -264,7 +305,37 @@ export default function EventPanel({
           </div>
           <div>
             <Label>Color</Label>
-            <input type="color" value={localPop.color} onChange={e => setLocalPop({ ...localPop, color: e.target.value })} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
+            <ColorPicker value={localPop.color} onChange={c => setLocalPop({ ...localPop, color: c })} palette={storage.getAllPopulationColors()} />
+          </div>
+          <div>
+            <Label>Add event</Label>
+            <div className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden">
+              {eventTemplates.length > 0 && (
+                <div className="max-h-44 overflow-y-auto">
+                  {eventTemplates.map(t => (
+                    <button
+                      key={t.label}
+                      type="button"
+                      onClick={() => onAddQuickEvent(localPop.id, t.label, t.color, t.durationH, t.offsetFromEndH)}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-white transition-colors border-b border-slate-100 last:border-b-0"
+                    >
+                      <span className="w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-black/5" style={{ backgroundColor: t.color }} />
+                      <span className="flex-1 truncate text-xs font-semibold text-slate-700">{t.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => onEnterIsolation(localPop.id)}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-indigo-600 hover:bg-indigo-50 transition-colors"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
+                  <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                </svg>
+                <span className="flex-1 text-xs font-bold">New</span>
+              </button>
+            </div>
           </div>
           <div className="pt-1 space-y-2">
             <button onClick={onClose} className="w-full px-3 py-2.5 rounded-lg text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-sm">

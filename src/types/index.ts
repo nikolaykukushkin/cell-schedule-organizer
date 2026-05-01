@@ -42,6 +42,8 @@ export interface CellPopulation {
   endHour: number;   // 0-23
   /** Free-text ID the user assigns to this experiment (e.g. "Exp 042"). Separate from its seed/harvest dates. */
   experimentLabel?: string;
+  /** Manual lane assignment (overrides greedy auto-layout). Set when the user drags to reorder. */
+  lane?: number;
 }
 
 /** An event box within an experiment bar. */

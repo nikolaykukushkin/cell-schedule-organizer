@@ -30,6 +30,36 @@ interface PopoverState {
   anchor: DOMRect;
 }
 
+function rangesOverlap(a: CellPopulation, b: CellPopulation): boolean {
+  return a.startDate <= b.endDate && b.startDate <= a.endDate;
+}
+
+/** Resolve effective lane for every population. Manual `pop.lane` wins; everything else
+ *  is filled greedily into the first non-conflicting lane. */
+function computeLanes(populations: CellPopulation[]): { laneByPop: Map<string, number>; totalLanes: number } {
+  const sorted = [...populations].sort((a, b) =>
+    a.startDate.localeCompare(b.startDate) || a.startHour - b.startHour || a.id.localeCompare(b.id)
+  );
+  const result = new Map<string, number>();
+  const laneRanges: { start: string; end: string }[][] = [];
+  const placeAt = (lane: number, p: CellPopulation) => {
+    while (laneRanges.length <= lane) laneRanges.push([]);
+    laneRanges[lane].push({ start: p.startDate, end: p.endDate });
+    result.set(p.id, lane);
+  };
+  for (const p of sorted) {
+    if (typeof p.lane === 'number' && p.lane >= 0) placeAt(p.lane, p);
+  }
+  for (const p of sorted) {
+    if (result.has(p.id)) continue;
+    let lane = 0;
+    const conflicts = (l: number) => (laneRanges[l] ?? []).some(r => p.startDate <= r.end && r.start <= p.endDate);
+    while (conflicts(lane)) lane++;
+    placeAt(lane, p);
+  }
+  return { laneByPop: result, totalLanes: Math.max(1, laneRanges.length) };
+}
+
 export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: CalendarGridProps) {
   const [populations, setPopulations] = useState<CellPopulation[]>(() =>
     storage.getPopulations(experimentId)
@@ -50,6 +80,8 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const [popover, setPopover] = useState<PopoverState | null>(null);
   const [isolatedExperimentId, setIsolatedExperimentId] = useState<string | null>(null);
   const [editingFullPanel, setEditingFullPanel] = useState(false);
+  const editingFullPanelRef = useRef(editingFullPanel);
+  useEffect(() => { editingFullPanelRef.current = editingFullPanel; }, [editingFullPanel]);
 
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [newDialogRange, setNewDialogRange] = useState<{ start: string; end: string } | null>(null);
@@ -152,29 +184,31 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     return { origin: minDate, dayCount: daysBetween(minDate, maxDate) + 1 };
   }, [populations, todayStr]);
 
-  // ---------- Lane assignment (greedy, stable) ----------
-  const { laneByPop, totalLanes } = useMemo(() => {
-    const sorted = [...populations].sort((a, b) =>
-      a.startDate.localeCompare(b.startDate) || a.startHour - b.startHour || a.id.localeCompare(b.id)
-    );
-    const laneEnds: string[] = []; // last endDate seen per lane
-    const result = new Map<string, number>();
-    for (const p of sorted) {
-      let lane = 0;
-      while (lane < laneEnds.length && p.startDate <= laneEnds[lane]) lane++;
-      laneEnds[lane] = p.endDate;
-      result.set(p.id, lane);
-    }
-    return { laneByPop: result, totalLanes: Math.max(1, laneEnds.length) };
-  }, [populations]);
+  // ---------- Lane assignment ----------
+  // Manual lanes (pop.lane) take priority. Remaining bars are placed greedily into the
+  // first lane that doesn't conflict, which preserves the old auto-layout for any pop
+  // the user hasn't explicitly placed.
+  const { laneByPop, totalLanes } = useMemo(() => computeLanes(populations), [populations]);
 
   // ---------- Selection helpers ----------
-  const closePopover = useCallback(() => setPopover(null), []);
+  // closePopover doubles as the deselect-on-blank-click handler — it tears down both
+  // the mini popover and the full details panel so the canvas returns to a clean state.
+  const closePopover = useCallback(() => {
+    setPopover(null);
+    setEditingFullPanel(false);
+  }, []);
   const handleSelectPop = useCallback((popId: string, anchor: DOMRect) => {
-    setPopover({ kind: 'pop', id: popId, popId, anchor });
+    setPopover(prev => {
+      // Switching to a different bar collapses the open details back to a mini popover.
+      if (prev && prev.popId !== popId) setEditingFullPanel(false);
+      return { kind: 'pop', id: popId, popId, anchor };
+    });
   }, []);
   const handleSelectEvent = useCallback((evId: string, popId: string, anchor: DOMRect) => {
-    setPopover({ kind: 'event', id: evId, popId, anchor });
+    setPopover(prev => {
+      if (prev && prev.id !== evId) setEditingFullPanel(false);
+      return { kind: 'event', id: evId, popId, anchor };
+    });
   }, []);
 
   // Recompute popover anchor (e.g. after scroll) by reading the DOM element back
@@ -201,6 +235,123 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const handleMovePop = useCallback((popId: string, dayDelta: number) => {
     setPopulations(prev => prev.map(p => p.id === popId ? { ...p, startDate: addDays(p.startDate, dayDelta), endDate: addDays(p.endDate, dayDelta) } : p));
     setEvents(prev => prev.map(ev => ev.populationId === popId ? { ...ev, startDate: addDays(ev.startDate, dayDelta), endDate: addDays(ev.endDate, dayDelta) } : ev));
+  }, []);
+
+  const handleSetPopLane = useCallback((popId: string, lane: number) => {
+    const targetLane = Math.max(0, lane);
+    setPopulations(prev => {
+      const target = prev.find(p => p.id === popId);
+      if (!target) return prev;
+      const { laneByPop } = computeLanes(prev);
+      const oldLane = laneByPop.get(popId) ?? 0;
+      if (oldLane === targetLane) return prev;
+      const dir = targetLane > oldLane ? 1 : -1;
+
+      // Cascade: place popId at targetLane; any pop already there with a date overlap
+      // gets pushed one lane in the direction of motion. Recurse.
+      const updates = new Map<string, number>();
+      const popById = new Map(prev.map(p => [p.id, p]));
+      const visit = (id: string, l: number) => {
+        if (updates.get(id) === l) return;
+        updates.set(id, l);
+        const me = popById.get(id);
+        if (!me) return;
+        for (const other of prev) {
+          if (other.id === id) continue;
+          const otherLane = updates.has(other.id) ? updates.get(other.id)! : (laneByPop.get(other.id) ?? 0);
+          if (otherLane !== l) continue;
+          if (!rangesOverlap(me, other)) continue;
+          visit(other.id, l + dir);
+        }
+      };
+      visit(popId, targetLane);
+
+      // If the cascade pushed something into a negative lane, shift everything down.
+      const minLane = Math.min(0, ...updates.values());
+      const shift = minLane < 0 ? -minLane : 0;
+
+      return prev.map(p => updates.has(p.id) ? { ...p, lane: updates.get(p.id)! + shift } : p);
+    });
+  }, []);
+
+  const handleDuplicatePop = useCallback((popId: string): string | null => {
+    const pop = populationsRef.current.find(p => p.id === popId);
+    if (!pop) return null;
+    const newPopId = crypto.randomUUID();
+    const newPop: CellPopulation = {
+      ...pop,
+      id: newPopId,
+      // Drop manual-lane so the duplicate finds its own row instead of stacking on the original.
+      lane: undefined,
+    };
+    const newEvents: SubEvent[] = eventsRef.current
+      .filter(ev => ev.populationId === popId)
+      .map(ev => ({ ...ev, id: crypto.randomUUID(), populationId: newPopId }));
+    setPopulations(prev => [...prev, newPop]);
+    setEvents(prev => [...prev, ...newEvents]);
+    return newPopId;
+  }, []);
+
+  const handleDuplicateEvent = useCallback((evId: string): string | null => {
+    const ev = eventsRef.current.find(e => e.id === evId);
+    if (!ev) return null;
+    const newId = crypto.randomUUID();
+    setEvents(prev => [...prev, { ...ev, id: newId }]);
+    return newId;
+  }, []);
+
+  const handleOpenPopDetails = useCallback((popId: string) => {
+    // Second double-click on the bar whose details are already open → escalate into isolation.
+    setPopover(prev => {
+      if (prev && prev.kind === 'pop' && prev.popId === popId && editingFullPanelRef.current) {
+        setEditingFullPanel(false);
+        setIsolatedExperimentId(popId);
+        return null;
+      }
+      const popEl = document.querySelector(`[data-pop-id="${popId}"]`) as HTMLElement | null;
+      setEditingFullPanel(true);
+      return { kind: 'pop', id: popId, popId, anchor: popEl?.getBoundingClientRect() ?? new DOMRect() };
+    });
+  }, []);
+
+  const handleAddQuickEvent = useCallback((popId: string, label: string, color: string, durationH: number, offsetFromEndH: number) => {
+    const pop = populationsRef.current.find(p => p.id === popId);
+    if (!pop) return;
+    const dur = Math.max(1, durationH);
+    // Place at the same hour-distance from the parent's end as the source event was
+    // (e.g. "1 day before harvest"), then clamp inside the parent if it doesn't fit.
+    let end = shiftDateHour(pop.endDate, pop.endHour, -Math.max(0, offsetFromEndH));
+    if (end.date < pop.startDate || (end.date === pop.startDate && end.hour < pop.startHour)) {
+      end = { date: pop.startDate, hour: pop.startHour };
+    }
+    let start = shiftDateHour(end.date, end.hour, -(dur - 1));
+    if (start.date < pop.startDate || (start.date === pop.startDate && start.hour < pop.startHour)) {
+      start = { date: pop.startDate, hour: pop.startHour };
+    }
+    if (end.date > pop.endDate || (end.date === pop.endDate && end.hour > pop.endHour)) {
+      end = { date: pop.endDate, hour: pop.endHour };
+    }
+    const newEv: SubEvent = {
+      id: crypto.randomUUID(),
+      populationId: popId,
+      label, color, comments: '',
+      allDay: dur >= 24 && dur % 24 === 0,
+      startDate: start.date, startHour: start.hour,
+      endDate: end.date, endHour: end.hour,
+    };
+    setEvents(prev => [...prev, newEv]);
+  }, []);
+
+  const handleEnterIsolationFor = useCallback((popId: string) => {
+    setIsolatedExperimentId(popId);
+    setEditingFullPanel(false);
+    setPopover(null);
+  }, []);
+
+  const handleOpenEventDetails = useCallback((evId: string, popId: string) => {
+    const evEl = document.querySelector(`[data-ev-id="${evId}"]`) as HTMLElement | null;
+    setPopover({ kind: 'event', id: evId, popId, anchor: evEl?.getBoundingClientRect() ?? new DOMRect() });
+    setEditingFullPanel(true);
   }, []);
 
   const handleResizePop = useCallback((popId: string, edge: 'start' | 'end', date: string, hour: number) => {
@@ -247,6 +398,32 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       const e2 = shiftDateHour(ev.endDate, ev.endHour, hourDelta);
       if (s.date < pop.startDate || e2.date > pop.endDate) return ev;
       return { ...ev, startDate: s.date, startHour: s.hour, endDate: e2.date, endHour: e2.hour };
+    }));
+  }, []);
+
+  const handleReparentEvent = useCallback((evId: string, newPopId: string, anchorDate: string, anchorHour: number) => {
+    setEvents(prev => prev.map(ev => {
+      if (ev.id !== evId) return ev;
+      const newPop = populationsRef.current.find(p => p.id === newPopId);
+      if (!newPop) return ev;
+      const durationH = daysBetween(ev.startDate, ev.endDate) * 24 + (ev.endHour - ev.startHour) + 1;
+      let start = { date: anchorDate, hour: anchorHour };
+      let end = shiftDateHour(start.date, start.hour, durationH - 1);
+      // Clamp inside the new parent.
+      if (start.date < newPop.startDate || (start.date === newPop.startDate && start.hour < newPop.startHour)) {
+        start = { date: newPop.startDate, hour: newPop.startHour };
+        end = shiftDateHour(start.date, start.hour, durationH - 1);
+      }
+      if (end.date > newPop.endDate || (end.date === newPop.endDate && end.hour > newPop.endHour)) {
+        end = { date: newPop.endDate, hour: newPop.endHour };
+        const earliest = shiftDateHour(end.date, end.hour, -(durationH - 1));
+        if (earliest.date > newPop.startDate || (earliest.date === newPop.startDate && earliest.hour >= newPop.startHour)) {
+          start = earliest;
+        } else {
+          start = { date: newPop.startDate, hour: newPop.startHour };
+        }
+      }
+      return { ...ev, populationId: newPopId, startDate: start.date, startHour: start.hour, endDate: end.date, endHour: end.hour };
     }));
   }, []);
 
@@ -358,6 +535,49 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           e.preventDefault();
         }
       }
+      // Copy/paste events between isolation modes (clipboard lives in sessionStorage so it
+      // survives navigation between different experiment pages).
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && !inField && (e.key === 'c' || e.key === 'C')) {
+        if (isolatedExperimentId && popover?.kind === 'event') {
+          const ev = eventsRef.current.find(x => x.id === popover.id);
+          const pop = populationsRef.current.find(p => p.id === isolatedExperimentId);
+          if (ev && pop) {
+            const startOffsetH = daysBetween(pop.startDate, ev.startDate) * 24 + (ev.startHour - pop.startHour);
+            const durationH = daysBetween(ev.startDate, ev.endDate) * 24 + (ev.endHour - ev.startHour) + 1;
+            sessionStorage.setItem('cell-scheduler:event-clipboard', JSON.stringify({
+              label: ev.label, color: ev.color, comments: ev.comments, allDay: ev.allDay,
+              startOffsetH, durationH,
+            }));
+            e.preventDefault();
+          }
+        }
+      }
+      if (meta && !inField && (e.key === 'v' || e.key === 'V')) {
+        if (isolatedExperimentId) {
+          const raw = sessionStorage.getItem('cell-scheduler:event-clipboard');
+          if (!raw) return;
+          try {
+            const clip = JSON.parse(raw) as { label: string; color: string; comments: string; allDay: boolean; startOffsetH: number; durationH: number };
+            const pop = populationsRef.current.find(p => p.id === isolatedExperimentId);
+            if (!pop) return;
+            const start = shiftDateHour(pop.startDate, pop.startHour, Math.max(0, clip.startOffsetH));
+            const end = shiftDateHour(start.date, start.hour, Math.max(1, clip.durationH) - 1);
+            // Clamp inside parent
+            let sd = start.date, sh = start.hour, ed = end.date, eh = end.hour;
+            if (sd < pop.startDate) { sd = pop.startDate; sh = 0; }
+            if (ed > pop.endDate) { ed = pop.endDate; eh = 23; }
+            const newEv: SubEvent = {
+              id: crypto.randomUUID(),
+              populationId: pop.id,
+              label: clip.label, color: clip.color, comments: clip.comments, allDay: clip.allDay,
+              startDate: sd, startHour: sh, endDate: ed, endHour: eh,
+            };
+            setEvents(prev => [...prev, newEv]);
+            e.preventDefault();
+          } catch {}
+        }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -423,11 +643,18 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         onMovePop={handleMovePop}
         onResizePop={handleResizePop}
         onSelectPop={handleSelectPop}
+        onSetPopLane={handleSetPopLane}
+        onDuplicatePop={handleDuplicatePop}
+        onOpenPopDetails={handleOpenPopDetails}
         onCreateEvent={handleCreateEvent}
         onMoveEvent={handleMoveEvent}
         onResizeEvent={handleResizeEvent}
         onSelectEvent={handleSelectEvent}
+        onDuplicateEvent={handleDuplicateEvent}
+        onOpenEventDetails={handleOpenEventDetails}
+        onReparentEvent={handleReparentEvent}
         onDeselect={closePopover}
+        onExitIsolation={() => { setIsolatedExperimentId(null); setPopover(null); }}
         onLayoutChange={refreshPopoverAnchor}
         scrollToTodayToken={scrollToTodayToken}
       />
@@ -441,9 +668,13 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
             isMobile={isMobile}
             population={popoverPop}
             eventCount={popoverEventCount}
-            onEnterIsolation={() => { setIsolatedExperimentId(popover.popId); setPopover(null); }}
+            eventTemplates={storage.getAllSubEventTemplates()}
+            onEnterIsolation={() => handleEnterIsolationFor(popover.popId)}
             onEditDetails={() => setEditingFullPanel(true)}
             onDelete={() => handleDeletePopulation(popover.popId)}
+            onAddQuickEvent={(label, color, durationH, offsetFromEndH) =>
+              handleAddQuickEvent(popover.popId, label, color, durationH, offsetFromEndH)
+            }
             onClose={closePopover}
           />
         ) : popoverEv ? (
@@ -470,7 +701,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           onUpdatePopulation={handleUpdatePopulation}
           onDeletePopulation={handleDeletePopulation}
           onRepeatNextWeek={handleRepeatNextWeek}
-          onClose={() => setEditingFullPanel(false)}
+          onEnterIsolation={handleEnterIsolationFor}
+          onAddQuickEvent={handleAddQuickEvent}
+          eventTemplates={storage.getAllSubEventTemplates()}
+          onClose={closePopover}
           isMobile={isMobile}
         />
       )}
