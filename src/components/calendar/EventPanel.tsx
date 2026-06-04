@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SubEvent, CellPopulation, PlateType, PLATE_LABELS, densityUnit } from '@/types';
+import { SubEvent, CellPopulation, Operator, PlateType, PLATE_LABELS, densityUnit } from '@/types';
 import * as storage from '@/lib/storage';
 import PlateVisual from './PlateVisual';
 import AutocompleteInput from './AutocompleteInput';
@@ -43,6 +43,9 @@ function useLocalState<T>(
 interface EventPanelProps {
   subEvent: SubEvent | null;
   population: CellPopulation | null;
+  /** Operator for the open population's experimenter (color owner). Null if no experimenter. */
+  operator: Operator | null;
+  onUpdateOperatorColor: (op: Operator, color: string) => void;
   allEvents: SubEvent[];
   onUpdateSubEvent: (evt: SubEvent) => void;
   onDeleteSubEvent: (id: string) => void;
@@ -130,6 +133,8 @@ function ColorPicker({ value, onChange, palette }: { value: string; onChange: (c
 export default function EventPanel({
   subEvent,
   population,
+  operator,
+  onUpdateOperatorColor,
   allEvents,
   onUpdateSubEvent,
   onDeleteSubEvent,
@@ -264,7 +269,7 @@ export default function EventPanel({
               <AutocompleteInput value={localPop.cellLine} onChange={v => setLocalPop({ ...localPop, cellLine: v })} suggestions={storage.getAllCellLines()} placeholder="e.g. HEK-293T" />
             </div>
             <div><Label>Passage #</Label><Input type="text" value={localPop.passage} onChange={e => setLocalPop({ ...localPop, passage: (e.target as HTMLInputElement).value })} placeholder="e.g. 12" /></div>
-            <div><Label>Experimenter</Label><Input type="text" value={localPop.experimenter} onChange={e => setLocalPop({ ...localPop, experimenter: (e.target as HTMLInputElement).value })} placeholder="e.g. Nikolay" /></div>
+            <div><Label>Experimenter</Label><AutocompleteInput value={localPop.experimenter} onChange={v => setLocalPop({ ...localPop, experimenter: v })} suggestions={storage.getAllOperatorNames()} placeholder="e.g. Nikolay" /></div>
             <div>
               <Label>Plate Type</Label>
               <select autoComplete="off" value={localPop.plateType} onChange={e => setLocalPop({ ...localPop, plateType: e.target.value as PlateType })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none">
@@ -305,7 +310,14 @@ export default function EventPanel({
           </div>
           <div>
             <Label>Color</Label>
-            <ColorPicker value={localPop.color} onChange={c => setLocalPop({ ...localPop, color: c })} palette={storage.getAllPopulationColors()} />
+            <ColorPicker
+              value={operator ? operator.color : localPop.color}
+              onChange={c => operator ? onUpdateOperatorColor(operator, c) : setLocalPop({ ...localPop, color: c })}
+              palette={operator ? storage.getAllOperatorColors() : storage.getAllPopulationColors()}
+            />
+            {operator && (
+              <p className="text-[11px] text-slate-400 mt-1.5">Recolors all of {operator.name}&apos;s experiments.</p>
+            )}
           </div>
           <div>
             <Label>Add event</Label>

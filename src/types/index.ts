@@ -68,6 +68,16 @@ export interface Connection {
   type: 'transplant' | 'merge' | 'split';
 }
 
+/** A lab operator. Color is owned here, not per-experiment: every experiment bar
+ *  whose `experimenter` matches this operator renders in its color. Global (shared
+ *  across all experiments). `id` is the normalized name, so the same name converges
+ *  to one record across devices. */
+export interface Operator {
+  id: string;    // normalized name (lowercased, trimmed, whitespace-collapsed)
+  name: string;  // display name (first-seen casing)
+  color: string;
+}
+
 export const PLATE_LABELS: Record<PlateType, string> = {
   '10cm': '10 cm Dish',
   '6-well': '6-Well Plate',
@@ -105,6 +115,14 @@ export const POPULATION_COLORS = [
 export const SUB_EVENT_COLORS = [
   '#fbbf24', '#a78bfa', '#34d399', '#f87171',
   '#60a5fa', '#fb923c', '#e879f9', '#2dd4bf',
+];
+
+/** Palette for auto-assigned operator colors. A new operator's default color is the
+ *  hash of its id into this list — stable per name and identical across devices. */
+export const OPERATOR_COLORS = [
+  '#3b82f6', '#ef4444', '#22c55e', '#f59e0b',
+  '#8b5cf6', '#ec4899', '#06b6d4', '#f97316',
+  '#14b8a6', '#a855f7', '#eab308', '#64748b',
 ];
 
 export const PRESET_CELL_LINES = [

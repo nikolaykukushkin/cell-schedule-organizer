@@ -1,6 +1,6 @@
-import { CellPopulation, SubEvent, Connection, ExperimentGroup } from '@/types';
+import { CellPopulation, SubEvent, Connection, ExperimentGroup, Operator } from '@/types';
 
-type Table = 'experiment_groups' | 'cell_populations' | 'sub_events' | 'connections';
+type Table = 'experiment_groups' | 'cell_populations' | 'sub_events' | 'connections' | 'operators';
 type Op = 'upsert' | 'delete';
 interface Mutation { table: Table; op: Op; row: Record<string, unknown> }
 
@@ -97,8 +97,11 @@ interface StateResponse {
   populations: ServerRow[];
   subEvents: ServerRow[];
   connections: ServerRow[];
+  operators?: ServerRow[];
   error?: string;
 }
+
+const OPERATORS_LS_KEY = 'cell-scheduler:operators';
 
 /** Full snapshot. Overwrites localStorage. Called on boot. */
 export async function pullFullSnapshot(experimentId: string): Promise<boolean> {
@@ -149,6 +152,12 @@ function applyFullSnapshot(experimentId: string, j: StateResponse) {
   const existingConns = JSON.parse(localStorage.getItem('cell-scheduler:connections') || '[]') as Connection[];
   const otherConns = existingConns.filter(c => c.experimentId !== experimentId);
   localStorage.setItem('cell-scheduler:connections', JSON.stringify([...otherConns, ...conns]));
+
+  // Operators are global (not experiment-scoped) — replace the whole list.
+  if (j.operators) {
+    const ops = j.operators.map(r => r.data as Operator).filter(Boolean);
+    localStorage.setItem(OPERATORS_LS_KEY, JSON.stringify(ops));
+  }
 }
 
 /** True while a form field is focused — used to suppress poll-driven overwrites during typing. */
@@ -179,7 +188,7 @@ async function pollDelta(experimentId: string) {
     const res = await fetch(url);
     if (!res.ok) return;
     const j = (await res.json()) as StateResponse;
-    const changed = (j.groups.length + j.populations.length + j.subEvents.length + j.connections.length) > 0;
+    const changed = (j.groups.length + j.populations.length + j.subEvents.length + j.connections.length + (j.operators?.length ?? 0)) > 0;
     if (!j.delta) {
       applyFullSnapshot(experimentId, j);
     } else {
@@ -235,6 +244,16 @@ function applyDelta(j: StateResponse) {
       else if (r.data) byId.set(r.id, r.data as Connection);
     }
     localStorage.setItem('cell-scheduler:connections', JSON.stringify([...byId.values()]));
+  }
+  if (j.operators && j.operators.length) {
+    const existing = JSON.parse(localStorage.getItem(OPERATORS_LS_KEY) || '[]') as Operator[];
+    const byId = new Map(existing.map(o => [o.id, o]));
+    for (const r of j.operators) {
+      if (pendingIds.has(r.id)) continue;
+      if (r.deleted) byId.delete(r.id);
+      else if (r.data) byId.set(r.id, r.data as Operator);
+    }
+    localStorage.setItem(OPERATORS_LS_KEY, JSON.stringify([...byId.values()]));
   }
 }
 

@@ -1,4 +1,4 @@
-import { ExperimentGroup, CellPopulation, SubEvent, Connection, PRESET_CELL_LINES } from '@/types';
+import { ExperimentGroup, CellPopulation, SubEvent, Connection, Operator, OPERATOR_COLORS, PRESET_CELL_LINES } from '@/types';
 import { enqueue } from './sync';
 
 // Re-export for backwards compat
@@ -8,6 +8,7 @@ const EXPERIMENTS_KEY = 'cell-scheduler:experiments';
 const POPULATIONS_KEY = 'cell-scheduler:populations';
 const SUBEVENTS_KEY = 'cell-scheduler:subevents';
 const CONNECTIONS_KEY = 'cell-scheduler:connections';
+const OPERATORS_KEY = 'cell-scheduler:operators';
 
 export function getItems<T>(key: string): T[] {
   if (typeof window === 'undefined') return [];
@@ -108,6 +109,61 @@ export function saveConnection(connection: Connection): void {
 export function deleteConnection(id: string): void {
   setItems(CONNECTIONS_KEY, getItems<Connection>(CONNECTIONS_KEY).filter(c => c.id !== id));
   enqueue({ table: 'connections', op: 'delete', row: { id } });
+}
+
+// Operators (global — color owner for experiment bars, keyed by normalized name)
+export function normalizeOperatorId(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+export function getOperators(): Operator[] {
+  return getItems<Operator>(OPERATORS_KEY);
+}
+
+export function getOperator(name: string): Operator | undefined {
+  const id = normalizeOperatorId(name);
+  if (!id) return undefined;
+  return getOperators().find(o => o.id === id);
+}
+
+export function saveOperator(operator: Operator): void {
+  const all = getOperators();
+  const idx = all.findIndex(o => o.id === operator.id);
+  if (idx >= 0) all[idx] = operator;
+  else all.push(operator);
+  setItems(OPERATORS_KEY, all);
+  enqueue({ table: 'operators', op: 'upsert', row: operator as unknown as Record<string, unknown> });
+}
+
+/** Stable, random-looking default color: hash of the normalized name into the palette.
+ *  Used both as the auto-assigned color for new operators and as the display fallback for
+ *  an experimenter that has no stored operator record yet. */
+export function defaultOperatorColor(name: string): string {
+  const id = normalizeOperatorId(name);
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return OPERATOR_COLORS[Math.abs(h) % OPERATOR_COLORS.length];
+}
+
+/** Ensure an operator exists for `name`. Returns true if a new one was created. */
+export function ensureOperator(name: string): boolean {
+  const id = normalizeOperatorId(name);
+  if (!id) return false;
+  if (getOperators().some(o => o.id === id)) return false;
+  saveOperator({ id, name: name.trim(), color: defaultOperatorColor(name) });
+  return true;
+}
+
+/** Distinct operator colors, ordered by frequency (most used first) — for the picker palette. */
+export function getAllOperatorColors(): string[] {
+  const counts = new Map<string, number>();
+  for (const o of getOperators()) if (o.color) counts.set(o.color, (counts.get(o.color) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c);
+}
+
+/** Distinct operator display names — for autocomplete. */
+export function getAllOperatorNames(): string[] {
+  return [...new Set(getOperators().map(o => o.name).filter(Boolean))];
 }
 
 // Export/Import

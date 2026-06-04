@@ -18,22 +18,25 @@ export async function GET(req: NextRequest) {
     const now = (await sql`SELECT now() AS now`)[0].now as string;
 
     if (since) {
-      const [groups, pops, events, conns] = await Promise.all([
+      // Operators are global (not experiment-scoped).
+      const [groups, pops, events, conns, operators] = await Promise.all([
         sql`SELECT id, data, updated_at, deleted FROM experiment_groups WHERE id = ${experimentId} AND updated_at > ${since}`,
         sql`SELECT id, data, updated_at, deleted FROM cell_populations WHERE experiment_id = ${experimentId} AND updated_at > ${since}`,
         sql`SELECT id, data, updated_at, deleted FROM sub_events WHERE updated_at > ${since} AND population_id IN (SELECT id FROM cell_populations WHERE experiment_id = ${experimentId})`,
         sql`SELECT id, data, updated_at, deleted FROM connections WHERE experiment_id = ${experimentId} AND updated_at > ${since}`,
+        sql`SELECT id, data, updated_at, deleted FROM operators WHERE updated_at > ${since}`,
       ]);
-      return NextResponse.json({ ok: true, now, delta: true, groups, populations: pops, subEvents: events, connections: conns });
+      return NextResponse.json({ ok: true, now, delta: true, groups, populations: pops, subEvents: events, connections: conns, operators });
     }
 
-    const [groups, pops, events, conns] = await Promise.all([
+    const [groups, pops, events, conns, operators] = await Promise.all([
       sql`SELECT id, data FROM experiment_groups WHERE id = ${experimentId} AND deleted = false`,
       sql`SELECT id, data FROM cell_populations WHERE experiment_id = ${experimentId} AND deleted = false`,
       sql`SELECT id, data FROM sub_events WHERE deleted = false AND population_id IN (SELECT id FROM cell_populations WHERE experiment_id = ${experimentId})`,
       sql`SELECT id, data FROM connections WHERE experiment_id = ${experimentId} AND deleted = false`,
+      sql`SELECT id, data FROM operators WHERE deleted = false`,
     ]);
-    return NextResponse.json({ ok: true, now, delta: false, groups, populations: pops, subEvents: events, connections: conns });
+    return NextResponse.json({ ok: true, now, delta: false, groups, populations: pops, subEvents: events, connections: conns, operators });
   } catch (err) {
     return NextResponse.json({ ok: false, error: String(err) }, { status: 500 });
   }

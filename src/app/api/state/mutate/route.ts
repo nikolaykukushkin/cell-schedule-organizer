@@ -3,7 +3,7 @@ import { getSql } from '@/lib/db';
 
 export const runtime = 'edge';
 
-type Table = 'experiment_groups' | 'cell_populations' | 'sub_events' | 'connections';
+type Table = 'experiment_groups' | 'cell_populations' | 'sub_events' | 'connections' | 'operators';
 type Op = 'upsert' | 'delete';
 
 interface Mutation {
@@ -12,7 +12,7 @@ interface Mutation {
   row: Record<string, unknown>;
 }
 
-const ALLOWED: Set<Table> = new Set(['experiment_groups', 'cell_populations', 'sub_events', 'connections']);
+const ALLOWED: Set<Table> = new Set(['experiment_groups', 'cell_populations', 'sub_events', 'connections', 'operators']);
 
 // POST /api/state/mutate  body: { mutations: Mutation[] }
 // Last-writer-wins: server stamps updated_at = now() for every mutation.
@@ -41,6 +41,8 @@ export async function POST(req: NextRequest) {
           await sql`UPDATE cell_populations SET deleted = true, updated_at = now() WHERE id = ${id}`;
         else if (m.table === 'sub_events')
           await sql`UPDATE sub_events SET deleted = true, updated_at = now() WHERE id = ${id}`;
+        else if (m.table === 'operators')
+          await sql`UPDATE operators SET deleted = true, updated_at = now() WHERE id = ${id}`;
         else
           await sql`UPDATE connections SET deleted = true, updated_at = now() WHERE id = ${id}`;
         continue;
@@ -59,6 +61,9 @@ export async function POST(req: NextRequest) {
         const populationId = row.populationId as string;
         await sql`INSERT INTO sub_events (id, population_id, data, updated_at, deleted) VALUES (${id}, ${populationId}, ${json}::jsonb, now(), false)
                   ON CONFLICT (id) DO UPDATE SET population_id = EXCLUDED.population_id, data = EXCLUDED.data, updated_at = now(), deleted = false`;
+      } else if (m.table === 'operators') {
+        await sql`INSERT INTO operators (id, data, updated_at, deleted) VALUES (${id}, ${json}::jsonb, now(), false)
+                  ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now(), deleted = false`;
       } else {
         const experimentId = (row.experimentId || 'default') as string;
         await sql`INSERT INTO connections (id, experiment_id, data, updated_at, deleted) VALUES (${id}, ${experimentId}, ${json}::jsonb, now(), false)

@@ -5,6 +5,7 @@ import {
   CellPopulation,
   SubEvent,
   Connection,
+  Operator,
   POPULATION_COLORS,
   SUB_EVENT_COLORS,
   PlateType,
@@ -70,6 +71,8 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const [, setConnections] = useState<Connection[]>(() =>
     storage.getConnections(experimentId)
   );
+  // Operators own the bar colors (global, keyed by experimenter name).
+  const [operators, setOperators] = useState<Operator[]>(() => storage.getOperators());
 
   // Stale-closure refs (kept in sync via effect to satisfy react-hooks/refs)
   const populationsRef = useRef(populations);
@@ -141,9 +144,31 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       setPopulations(newPops);
       setEvents(newEvts);
       setConnections(storage.getConnections(experimentId));
+      setOperators(storage.getOperators());
     });
     return off;
   }, [experimentId]);
+
+  // Operators own bar colors. A bar's color is its operator's color; for an experimenter
+  // with no stored operator record yet, fall back to the deterministic default for that
+  // name. Bars with no experimenter keep their own stored color (legacy).
+  // Operator records get persisted (for sync + autocomplete) in the population mutation
+  // handlers below via storage.ensureOperator.
+  const operatorById = useMemo(() => new Map(operators.map(o => [o.id, o])), [operators]);
+  const colorForPop = useCallback((p: CellPopulation): string => {
+    const name = (p.experimenter || '').trim();
+    if (!name) return p.color;
+    return operatorById.get(storage.normalizeOperatorId(name))?.color || storage.defaultOperatorColor(name);
+  }, [operatorById]);
+  const displayPopulations = useMemo(
+    () => populations.map(p => ({ ...p, color: colorForPop(p) })),
+    [populations, colorForPop]
+  );
+
+  const handleUpdateOperatorColor = useCallback((op: Operator, color: string) => {
+    storage.saveOperator({ ...op, color });
+    setOperators(storage.getOperators());
+  }, []);
 
   // ---------- Responsive axis ----------
   const [axis, setAxis] = useState<Axis>('horizontal');
@@ -453,6 +478,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   }, []);
   const handleUpdatePopulation = useCallback((updated: CellPopulation) => {
     setPopulations(prev => prev.map(p => (p.id === updated.id ? updated : p)));
+    if (storage.ensureOperator(updated.experimenter)) setOperators(storage.getOperators());
   }, []);
   const handleDeletePopulation = useCallback((id: string) => {
     setPopulations(prev => prev.filter(p => p.id !== id));
@@ -484,6 +510,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     }));
     setPopulations(prev => [...prev, newPop]);
     setEvents(prev => [...prev, ...newEvents]);
+    if (storage.ensureOperator(newPop.experimenter)) setOperators(storage.getOperators());
   }, []);
 
   // ---------- Dialog confirm/cancel ----------
@@ -509,6 +536,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     setPopulations(prev => [...prev, pop]);
     setShowNewDialog(false);
     setNewDialogRange(null);
+    if (storage.ensureOperator(pop.experimenter)) setOperators(storage.getOperators());
   }, [newDialogRange, experimentId, populations.length]);
 
   const handleCancelNewPop = useCallback(() => {
@@ -585,11 +613,22 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
 
   // ---------- Derived for popover/panel ----------
   const popoverPop = popover ? populations.find(p => p.id === popover.popId) : null;
+  // Display copy with operator color resolved (popover swatch / isolation toolbar).
+  const popoverPopDisplay = popoverPop ? { ...popoverPop, color: colorForPop(popoverPop) } : null;
   const popoverEv = popover?.kind === 'event' ? events.find(e => e.id === popover.id) : null;
   const popoverEventCount = popoverPop ? events.filter(e => e.populationId === popoverPop.id).length : 0;
 
   const fullPanelEvent = editingFullPanel && popover?.kind === 'event' ? popoverEv ?? null : null;
   const fullPanelPop = editingFullPanel && popover?.kind === 'pop' ? popoverPop ?? null : null;
+  // Operator for the population open in the full panel (its color picker edits this).
+  // Synthesize one from the experimenter name if no record is stored yet, so editing the
+  // color works immediately (the first edit persists it via handleUpdateOperatorColor).
+  const fullPanelOperator: Operator | null = (() => {
+    const name = (fullPanelPop?.experimenter || '').trim();
+    if (!name) return null;
+    const id = storage.normalizeOperatorId(name);
+    return operatorById.get(id) ?? { id, name, color: storage.defaultOperatorColor(name) };
+  })();
 
   // Selected ids for visual state in Timeline
   const selectedPopId = popover?.kind === 'pop' ? popover.id : (popover?.kind === 'event' ? popover.popId : null);
@@ -612,15 +651,15 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       </div>
 
       {/* Isolation toolbar (only when active) */}
-      {isolatedExperimentId && popoverPop && popoverPop.id === isolatedExperimentId && (
+      {isolatedExperimentId && popoverPopDisplay && popoverPopDisplay.id === isolatedExperimentId && (
         <IsolationToolbar
-          population={popoverPop}
+          population={popoverPopDisplay}
           eventCount={popoverEventCount}
           onExit={() => setIsolatedExperimentId(null)}
         />
       )}
       {isolatedExperimentId && (!popoverPop || popoverPop.id !== isolatedExperimentId) && (() => {
-        const isoPop = populations.find(p => p.id === isolatedExperimentId);
+        const isoPop = displayPopulations.find(p => p.id === isolatedExperimentId);
         if (!isoPop) return null;
         const count = events.filter(e => e.populationId === isolatedExperimentId).length;
         return <IsolationToolbar population={isoPop} eventCount={count} onExit={() => setIsolatedExperimentId(null)} />;
@@ -631,7 +670,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         axis={axis}
         origin={origin}
         dayCount={dayCount}
-        populations={populations}
+        populations={displayPopulations}
         events={events}
         laneByPop={laneByPop}
         totalLanes={totalLanes}
@@ -666,7 +705,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
             kind="pop"
             anchor={popover.anchor}
             isMobile={isMobile}
-            population={popoverPop}
+            population={popoverPopDisplay!}
             eventCount={popoverEventCount}
             eventTemplates={storage.getAllSubEventTemplates()}
             onEnterIsolation={() => handleEnterIsolationFor(popover.popId)}
@@ -695,6 +734,8 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         <EventPanel
           subEvent={fullPanelEvent}
           population={fullPanelPop}
+          operator={fullPanelOperator}
+          onUpdateOperatorColor={handleUpdateOperatorColor}
           allEvents={events}
           onUpdateSubEvent={handleUpdateEvent}
           onDeleteSubEvent={handleDeleteEvent}
