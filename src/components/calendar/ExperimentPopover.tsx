@@ -189,7 +189,7 @@ function PopBody({
         <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 px-1">Add event</div>
         <div className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden">
           {eventTemplates.length > 0 && (
-            <div className="max-h-44 overflow-y-auto">
+            <div className="max-h-24 overflow-y-auto">
               {eventTemplates.map(t => (
                 <button
                   key={t.label}

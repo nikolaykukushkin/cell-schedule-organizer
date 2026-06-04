@@ -759,6 +759,9 @@ export default function Timeline(props: TimelineProps) {
                       {platesLabel(pop.plateType, pop.plateCount)}
                     </span>
                     <span className={`${isHoriz ? 'text-[12px]' : 'text-[10px]'} font-semibold truncate leading-tight opacity-80`} style={{ color: pop.color }}>
+                      {pop.experimentLabel && (
+                        <span className="font-bold opacity-100">{pop.experimentLabel} </span>
+                      )}
                       {pop.name}
                       {pop.cellDensity && isHoriz && (
                         <span className="opacity-70 font-medium"> · {pop.cellDensity} {densityUnit(pop.plateType)}</span>
