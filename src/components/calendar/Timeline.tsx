@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CellPopulation, SubEvent, densityUnit, platesLabel } from '@/types';
+import { CellPopulation, SubEvent, platesAbbrev } from '@/types';
 import { addDays, daysBetween } from '@/lib/dates';
 
 export type Axis = 'horizontal' | 'vertical';
@@ -757,12 +757,9 @@ export default function Timeline(props: TimelineProps) {
                   <div className={`flex flex-col justify-center gap-0.5 ${isHoriz ? 'px-3' : 'px-1.5 py-1.5 text-center'} h-full pointer-events-none overflow-hidden`}>
                     {/* Line 1: plate abbreviation · cell line */}
                     <span className={`${isHoriz ? 'text-[13px]' : 'text-[11px]'} font-bold truncate leading-tight`} style={{ color: pop.color }}>
-                      {platesLabel(pop.plateType, pop.plateCount)}
+                      {platesAbbrev(pop.plateType, pop.plateCount)}
                       {pop.cellLine && (
                         <span className="font-semibold opacity-70"> · {pop.cellLine}</span>
-                      )}
-                      {pop.cellDensity && isHoriz && (
-                        <span className="font-medium opacity-55"> · {pop.cellDensity} {densityUnit(pop.plateType)}</span>
                       )}
                     </span>
                     {/* Line 2: experiment ID · name */}
@@ -772,11 +769,6 @@ export default function Timeline(props: TimelineProps) {
                       )}
                       {pop.name}
                     </span>
-                    {!isHoriz && pop.cellDensity && (
-                      <span className="text-[10px] font-semibold opacity-70" style={{ color: pop.color }}>
-                        {pop.cellDensity} {densityUnit(pop.plateType)}
-                      </span>
-                    )}
                   </div>
 
                   {/* Resize handles — disabled in isolation */}

@@ -107,6 +107,27 @@ export function platesLabel(plateType: PlateType, count: number): string {
   return `${count}× ${plural}`;
 }
 
+/** Compact plate codes for tight contexts like calendar bars (e.g. "24W", "T75"). */
+export const PLATE_ABBREV: Record<PlateType, string> = {
+  '10cm': '10cm',
+  '6-well': '6W',
+  '8-well': '8W',
+  '12-well': '12W',
+  '24-well': '24W',
+  '48-well': '48W',
+  '96-well': '96W',
+  '35mm': '35mm',
+  '60mm': '60mm',
+  'T25': 'T25',
+  'T75': 'T75',
+  'T175': 'T175',
+};
+
+/** Abbreviated plate label for tight contexts, e.g. "2x24W". */
+export function platesAbbrev(plateType: PlateType, count: number): string {
+  return `${count}x${PLATE_ABBREV[plateType]}`;
+}
+
 export const POPULATION_COLORS = [
   '#3b82f6', '#ef4444', '#22c55e', '#f59e0b',
   '#8b5cf6', '#ec4899', '#06b6d4', '#f97316',
