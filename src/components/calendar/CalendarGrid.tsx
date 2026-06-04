@@ -306,6 +306,8 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     const newPop: CellPopulation = {
       ...pop,
       id: newPopId,
+      // A copy is a fresh passage — clear the inherited passage number.
+      passage: '',
       // Drop manual-lane so the duplicate finds its own row instead of stacking on the original.
       lane: undefined,
     };
@@ -498,6 +500,8 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       id: newPopId,
       startDate: addDays(pop.startDate, 7),
       endDate: addDays(pop.endDate, 7),
+      // A repeat is a fresh passage — clear the inherited passage number.
+      passage: '',
       color: POPULATION_COLORS[(populationsRef.current.length) % POPULATION_COLORS.length],
     };
     const popEvents = eventsRef.current.filter(ev => ev.populationId === popId);
@@ -711,6 +715,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
             onEnterIsolation={() => handleEnterIsolationFor(popover.popId)}
             onEditDetails={() => setEditingFullPanel(true)}
             onDelete={() => handleDeletePopulation(popover.popId)}
+            onRepeatNextWeek={() => { handleRepeatNextWeek(popover.popId); closePopover(); }}
             onAddQuickEvent={(label, color, durationH, offsetFromEndH) =>
               handleAddQuickEvent(popover.popId, label, color, durationH, offsetFromEndH)
             }

@@ -95,7 +95,9 @@ function Input({ ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
   );
 }
 
-function ColorPicker({ value, onChange, palette }: { value: string; onChange: (c: string) => void; palette: string[] }) {
+function ColorPicker({ label, value, onChange, palette }: { label: string; value: string; onChange: (c: string) => void; palette: string[] }) {
+  const [open, setOpen] = useState(false);
+
   // De-duplicate while preserving order; ensure the current value is always offered.
   const seen = new Set<string>();
   const swatches: string[] = [];
@@ -106,26 +108,47 @@ function ColorPicker({ value, onChange, palette }: { value: string; onChange: (c
     seen.add(lower);
     swatches.push(c);
   }
+
   return (
-    <div className="space-y-2">
-      {swatches.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {swatches.map(c => {
-            const selected = c.toLowerCase() === (value || '').toLowerCase();
-            return (
-              <button
-                key={c}
-                type="button"
-                onClick={() => onChange(c)}
-                aria-label={`Use color ${c}`}
-                className={`w-6 h-6 rounded-full border-2 transition-transform ${selected ? 'border-slate-700 scale-110' : 'border-white shadow-sm hover:scale-105'}`}
-                style={{ backgroundColor: c, boxShadow: selected ? '0 0 0 2px rgb(99 102 241 / 0.4)' : undefined }}
-              />
-            );
-          })}
+    <div data-no-drag>
+      {/* "Color" label and the current-color circle share one line; the circle toggles the pane. */}
+      <div className="flex items-center justify-between">
+        <Label>{label}</Label>
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          aria-label="Choose color"
+          aria-expanded={open}
+          className="w-6 h-6 rounded-full border-2 border-white shadow-sm ring-1 ring-black/10 hover:scale-105 transition-transform mb-1"
+          style={{ backgroundColor: value }}
+        />
+      </div>
+
+      {open && (
+        <div className="mt-1.5 p-2 rounded-lg border border-slate-200 bg-slate-50/60 space-y-2">
+          {swatches.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {swatches.map(c => {
+                const selected = c.toLowerCase() === (value || '').toLowerCase();
+                return (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => { onChange(c); setOpen(false); }}
+                    aria-label={`Use color ${c}`}
+                    className={`w-6 h-6 rounded-full border-2 transition-transform ${selected ? 'border-slate-700 scale-110' : 'border-white shadow-sm hover:scale-105'}`}
+                    style={{ backgroundColor: c, boxShadow: selected ? '0 0 0 2px rgb(99 102 241 / 0.4)' : undefined }}
+                  />
+                );
+              })}
+            </div>
+          )}
+          <label className="flex items-center gap-2 text-xs font-semibold text-slate-500 cursor-pointer">
+            <input type="color" value={value} onChange={e => onChange(e.target.value)} className="w-6 h-6 rounded cursor-pointer bg-white p-0 border border-slate-200" />
+            Custom
+          </label>
         </div>
       )}
-      <input type="color" value={value} onChange={e => onChange(e.target.value)} className="w-full h-9 border border-slate-200 rounded-lg cursor-pointer bg-white" />
     </div>
   );
 }
@@ -245,8 +268,7 @@ export default function EventPanel({
             <textarea autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} value={localEvent.comments || ''} onChange={e => setLocalEvent({ ...localEvent, comments: e.target.value })} placeholder="Notes about this event..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
           </div>
           <div>
-            <Label>Color</Label>
-            <ColorPicker value={localEvent.color} onChange={c => setLocalEvent({ ...localEvent, color: c })} palette={storage.getAllSubEventColors()} />
+            <ColorPicker label="Color" value={localEvent.color} onChange={c => setLocalEvent({ ...localEvent, color: c })} palette={storage.getAllSubEventColors()} />
           </div>
           <div className="pt-1 space-y-2">
             <button onClick={onClose} className="w-full px-3 py-2.5 rounded-lg text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-sm">
@@ -309,8 +331,8 @@ export default function EventPanel({
             <textarea autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false} value={localPop.comments || ''} onChange={e => setLocalPop({ ...localPop, comments: e.target.value })} placeholder="Notes about this experiment..." rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white placeholder:text-slate-300 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none resize-none" />
           </div>
           <div>
-            <Label>Color</Label>
             <ColorPicker
+              label="Color"
               value={operator ? operator.color : localPop.color}
               onChange={c => operator ? onUpdateOperatorColor(operator, c) : setLocalPop({ ...localPop, color: c })}
               palette={operator ? storage.getAllOperatorColors() : storage.getAllPopulationColors()}

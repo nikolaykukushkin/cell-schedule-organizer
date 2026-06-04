@@ -19,6 +19,7 @@ interface PopProps extends BaseProps {
   onEnterIsolation: () => void;
   onEditDetails: () => void;
   onDelete: () => void;
+  onRepeatNextWeek: () => void;
   onAddQuickEvent: (label: string, color: string, durationH: number, offsetFromEndH: number) => void;
 }
 
@@ -90,7 +91,7 @@ export default function ExperimentPopover(props: ExperimentPopoverProps) {
     : 'fixed z-50 bg-white rounded-2xl shadow-2xl border border-slate-200 p-3';
 
   if (props.kind === 'pop') {
-    const { population: p, eventCount, eventTemplates, onEnterIsolation, onEditDetails, onDelete, onAddQuickEvent } = props;
+    const { population: p, eventCount, eventTemplates, onEnterIsolation, onEditDetails, onDelete, onRepeatNextWeek, onAddQuickEvent } = props;
     return (
       <PopBody
         population={p}
@@ -99,6 +100,7 @@ export default function ExperimentPopover(props: ExperimentPopoverProps) {
         onEnterIsolation={onEnterIsolation}
         onEditDetails={onEditDetails}
         onDelete={onDelete}
+        onRepeatNextWeek={onRepeatNextWeek}
         onAddQuickEvent={onAddQuickEvent}
         onClose={onClose}
         containerRef={ref}
@@ -150,6 +152,7 @@ interface PopBodyProps {
   onEnterIsolation: () => void;
   onEditDetails: () => void;
   onDelete: () => void;
+  onRepeatNextWeek: () => void;
   onAddQuickEvent: (label: string, color: string, durationH: number, offsetFromEndH: number) => void;
   onClose: () => void;
   containerRef: React.RefObject<HTMLDivElement | null>;
@@ -159,7 +162,7 @@ interface PopBodyProps {
 
 function PopBody({
   population: p, eventTemplates,
-  onEnterIsolation, onEditDetails, onDelete, onAddQuickEvent, onClose,
+  onEnterIsolation, onEditDetails, onDelete, onRepeatNextWeek, onAddQuickEvent, onClose,
   containerRef, containerClasses, containerStyle,
 }: PopBodyProps) {
   return (
@@ -213,6 +216,16 @@ function PopBody({
           </button>
         </div>
       </div>
+
+      <button
+        onClick={onRepeatNextWeek}
+        className="w-full flex items-center justify-center gap-1.5 px-2 py-2 mb-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 transition-colors"
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
+          <path d="M2.5 8a5.5 5.5 0 1 1 1.6 3.9M2.5 12.5V8.5h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        Repeat next week
+      </button>
 
       <div className="grid grid-cols-2 gap-1.5">
         <button
