@@ -18,6 +18,7 @@ import EventPanel from './EventPanel';
 import NewPopulationDialog from './NewPopulationDialog';
 import ExperimentPopover from './ExperimentPopover';
 import IsolationToolbar from './IsolationToolbar';
+import IsolationAddPanel from './IsolationAddPanel';
 
 interface CalendarGridProps {
   experimentId: string;
@@ -416,6 +417,27 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     setEvents(prev => [...prev, ev]);
   }, []);
 
+  // "Create new" from the isolation add-panel: drop a fresh full-day event at the start
+  // of the population and open its inspector so the user can name it immediately.
+  const handleCreateBlankEvent = useCallback((popId: string) => {
+    const pop = populationsRef.current.find(p => p.id === popId);
+    if (!pop) return;
+    const id = crypto.randomUUID();
+    const ev: SubEvent = {
+      id,
+      populationId: popId,
+      label: 'New event',
+      comments: '',
+      allDay: false,
+      startDate: pop.startDate, startHour: 0,
+      endDate: pop.startDate, endHour: 23,
+      color: SUB_EVENT_COLORS[eventsRef.current.filter(e => e.populationId === popId).length % SUB_EVENT_COLORS.length],
+    };
+    setEvents(prev => [...prev, ev]);
+    setPopover({ kind: 'event', id, popId, anchor: new DOMRect() });
+    setEditingFullPanel(true);
+  }, []);
+
   const handleMoveEvent = useCallback((evId: string, hourDelta: number) => {
     setEvents(prev => prev.map(ev => {
       if (ev.id !== evId) return ev;
@@ -639,7 +661,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const selectedEventId = popover?.kind === 'event' ? popover.id : null;
 
   return (
-    <div className="flex-1 flex flex-col h-full">
+    <div className="flex-1 flex flex-col h-full relative">
       {/* Toolbar */}
       <div className="border-b border-slate-200/80 bg-white flex items-center px-3 py-2 flex-shrink-0">
         <button
@@ -754,6 +776,23 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           isMobile={isMobile}
         />
       )}
+
+      {/* Floating add-event pane — auto-surfaced over the dimmed area in isolation mode */}
+      {isolatedExperimentId && !editingFullPanel && (() => {
+        const isoPop = displayPopulations.find(p => p.id === isolatedExperimentId);
+        if (!isoPop) return null;
+        return (
+          <IsolationAddPanel
+            population={isoPop}
+            eventTemplates={storage.getAllSubEventTemplates()}
+            isMobile={isMobile}
+            onAddQuickEvent={(label, color, durationH, offsetFromEndH) =>
+              handleAddQuickEvent(isolatedExperimentId, label, color, durationH, offsetFromEndH)
+            }
+            onCreateNew={() => handleCreateBlankEvent(isolatedExperimentId)}
+          />
+        );
+      })()}
 
       {/* New experiment dialog */}
       {showNewDialog && newDialogRange && (
