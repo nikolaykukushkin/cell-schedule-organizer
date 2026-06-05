@@ -82,6 +82,9 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   useEffect(() => { eventsRef.current = events; }, [events]);
 
   const [popover, setPopover] = useState<PopoverState | null>(null);
+  // Experiments picked out by a shift-drag marquee. Independent of the single-bar
+  // popover selection; populated only by the rubber-band gesture.
+  const [selectedPopIds, setSelectedPopIds] = useState<string[]>([]);
   const [isolatedExperimentId, setIsolatedExperimentId] = useState<string | null>(null);
   const [editingFullPanel, setEditingFullPanel] = useState(false);
   const editingFullPanelRef = useRef(editingFullPanel);
@@ -222,8 +225,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const closePopover = useCallback(() => {
     setPopover(null);
     setEditingFullPanel(false);
+    setSelectedPopIds([]);
   }, []);
   const handleSelectPop = useCallback((popId: string, anchor: DOMRect) => {
+    setSelectedPopIds([]);
     setPopover(prev => {
       // Switching to a different bar collapses the open details back to a mini popover.
       if (prev && prev.popId !== popId) setEditingFullPanel(false);
@@ -231,11 +236,32 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     });
   }, []);
   const handleSelectEvent = useCallback((evId: string, popId: string, anchor: DOMRect) => {
+    setSelectedPopIds([]);
     setPopover(prev => {
       if (prev && prev.id !== evId) setEditingFullPanel(false);
       return { kind: 'event', id: evId, popId, anchor };
     });
   }, []);
+
+  // ---------- Multi-select (shift-drag marquee) ----------
+  const handleMarqueeSelect = useCallback((ids: string[]) => {
+    // A marquee result replaces the selection and tears down any open popover/details.
+    setPopover(null);
+    setEditingFullPanel(false);
+    setSelectedPopIds(ids);
+  }, []);
+  const clearSelection = useCallback(() => setSelectedPopIds([]), []);
+  const handleDeleteSelected = useCallback(() => {
+    setSelectedPopIds(ids => {
+      if (ids.length === 0) return ids;
+      const drop = new Set(ids);
+      setPopulations(prev => prev.filter(p => !drop.has(p.id)));
+      setEvents(prev => prev.filter(e => !drop.has(e.populationId)));
+      setConnections(prev => prev.filter(c => !drop.has(c.sourcePopulationId) && !drop.has(c.targetPopulationId)));
+      if (isolatedExperimentId && drop.has(isolatedExperimentId)) setIsolatedExperimentId(null);
+      return [];
+    });
+  }, [isolatedExperimentId]);
 
   // Recompute popover anchor (e.g. after scroll) by reading the DOM element back
   const refreshPopoverAnchor = useCallback(() => {
@@ -319,6 +345,15 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     setEvents(prev => [...prev, ...newEvents]);
     return newPopId;
   }, []);
+
+  // Duplicate every marquee-selected experiment, then select the copies.
+  const handleDuplicateSelected = useCallback(() => {
+    setSelectedPopIds(ids => {
+      const newIds: string[] = [];
+      ids.forEach(id => { const n = handleDuplicatePop(id); if (n) newIds.push(n); });
+      return newIds;
+    });
+  }, [handleDuplicatePop]);
 
   const handleDuplicateEvent = useCallback((evId: string): string | null => {
     const ev = eventsRef.current.find(e => e.id === evId);
@@ -578,10 +613,14 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       if (e.key === 'Escape') {
         if (editingFullPanel) { setEditingFullPanel(false); return; }
         if (isolatedExperimentId) { setIsolatedExperimentId(null); setPopover(null); return; }
+        if (selectedPopIds.length > 0) { setSelectedPopIds([]); return; }
         if (popover) { setPopover(null); return; }
       }
       if (!inField && (e.key === 'Backspace' || e.key === 'Delete')) {
-        if (popover?.kind === 'event') {
+        if (selectedPopIds.length > 0) {
+          handleDeleteSelected();
+          e.preventDefault();
+        } else if (popover?.kind === 'event') {
           handleDeleteEvent(popover.id);
           e.preventDefault();
         } else if (popover?.kind === 'pop') {
@@ -635,7 +674,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [popover, editingFullPanel, isolatedExperimentId, handleDeleteEvent, handleDeletePopulation]);
+  }, [popover, editingFullPanel, isolatedExperimentId, selectedPopIds, handleDeleteEvent, handleDeletePopulation, handleDeleteSelected]);
 
   // ---------- Derived for popover/panel ----------
   const popoverPop = popover ? populations.find(p => p.id === popover.popId) : null;
@@ -671,7 +710,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           Today
         </button>
         <span className="ml-3 text-[11px] font-semibold text-slate-400 hidden sm:inline">
-          Drag empty space to create an experiment · click a bar to open it
+          Drag empty space to create an experiment · shift-drag to select · click a bar to open it
         </span>
         <SyncBadge status={syncStatus} />
       </div>
@@ -702,6 +741,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         totalLanes={totalLanes}
         selectedPopId={selectedPopId}
         selectedEventId={selectedEventId}
+        selectedPopIds={selectedPopIds}
         isolatedExperimentId={isolatedExperimentId}
         todayStr={todayStr}
         onCreatePop={handleCreatePop}
@@ -719,6 +759,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         onOpenEventDetails={handleOpenEventDetails}
         onReparentEvent={handleReparentEvent}
         onDeselect={closePopover}
+        onMarqueeSelect={handleMarqueeSelect}
         onExitIsolation={() => { setIsolatedExperimentId(null); setPopover(null); }}
         onLayoutChange={refreshPopoverAnchor}
         scrollToTodayToken={scrollToTodayToken}
@@ -793,6 +834,36 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           />
         );
       })()}
+
+      {/* Multi-select action bar — shown while a shift-drag selection is active */}
+      {selectedPopIds.length > 0 && !isolatedExperimentId && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-1 bg-slate-900 text-white rounded-2xl shadow-2xl px-2 py-1.5">
+          <span className="px-2.5 text-xs font-bold whitespace-nowrap">
+            {selectedPopIds.length} selected
+          </span>
+          <div className="w-px h-5 bg-white/20" />
+          <button
+            onClick={handleDuplicateSelected}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold hover:bg-white/15 transition-colors"
+          >
+            Duplicate
+          </button>
+          <button
+            onClick={handleDeleteSelected}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold text-red-300 hover:bg-red-500/25 transition-colors"
+          >
+            Delete
+          </button>
+          <button
+            onClick={clearSelection}
+            aria-label="Clear selection"
+            title="Clear (Esc)"
+            className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/15 transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+          </button>
+        </div>
+      )}
 
       {/* New experiment dialog */}
       {showNewDialog && newDialogRange && (

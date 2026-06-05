@@ -35,6 +35,8 @@ export interface TimelineProps {
   totalLanes: number;
   selectedPopId: string | null;
   selectedEventId: string | null;
+  /** Experiments highlighted by a shift-drag marquee selection. */
+  selectedPopIds: string[];
   isolatedExperimentId: string | null;
   todayStr: string;
   syncStatus?: string;
@@ -58,6 +60,8 @@ export interface TimelineProps {
   onReparentEvent: (evId: string, newPopId: string, anchorDate: string, anchorHour: number) => void;
 
   onDeselect: () => void;
+  /** Report the experiments enclosed by a shift-drag marquee (replaces selection). */
+  onMarqueeSelect: (popIds: string[]) => void;
   onExitIsolation: () => void;
 
   /** Hook: recompute popover anchor when layout shifts (scroll, resize, drag). */
@@ -117,6 +121,7 @@ interface DragState {
 
 type DragMode =
   | { kind: 'none' }
+  | { kind: 'marquee' }
   | { kind: 'create-pop' }
   | { kind: 'create-event'; popId: string }
   | { kind: 'move-pop'; popId: string }
@@ -130,12 +135,12 @@ export default function Timeline(props: TimelineProps) {
   const {
     axis, origin, dayCount, populations, events,
     laneByPop, totalLanes,
-    selectedPopId, selectedEventId, isolatedExperimentId, todayStr,
+    selectedPopId, selectedEventId, selectedPopIds, isolatedExperimentId, todayStr,
     onCreatePop, onMovePop, onResizePop, onSelectPop,
     onSetPopLane, onDuplicatePop, onOpenPopDetails,
     onCreateEvent, onMoveEvent, onResizeEvent, onSelectEvent,
     onDuplicateEvent, onOpenEventDetails, onReparentEvent,
-    onDeselect, onExitIsolation, onLayoutChange,
+    onDeselect, onMarqueeSelect, onExitIsolation, onLayoutChange,
     scrollToTodayToken,
   } = props;
 
@@ -160,6 +165,8 @@ export default function Timeline(props: TimelineProps) {
   const dragRef = useRef<DragState | null>(null);
   // Live preview for create-pop / create-event drags
   const [dragPreview, setDragPreview] = useState<{ kind: 'pop' | 'event'; popId?: string; startDate: string; startHour: number; endDate: string; endHour: number } | null>(null);
+  // Live rubber-band rectangle for shift-drag multi-select (lane-area-local pixels).
+  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
 
   // --- Convert client x/y → date/hour ---
   const clientToDH = useCallback((clientX: number, clientY: number): { date: string; hour: number } | null => {
@@ -187,6 +194,37 @@ export default function Timeline(props: TimelineProps) {
     const lane = Math.floor((posCross - geom.laneGap) / (geom.lanePx + geom.laneGap));
     return Math.max(0, lane);
   }, [axis, geom.lanePx, geom.laneGap]);
+
+  // --- Marquee (shift-drag multi-select) geometry ---
+  // Two client points → a rectangle in lane-area-local pixels (for rendering the overlay,
+  // which lives inside the scrolled lane content so it tracks the bars).
+  const clientRectToLocal = useCallback((x0: number, y0: number, x1: number, y1: number) => {
+    const el = laneAreaRef.current;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      left: Math.min(x0, x1) - r.left,
+      top: Math.min(y0, y1) - r.top,
+      width: Math.abs(x1 - x0),
+      height: Math.abs(y1 - y0),
+    };
+  }, []);
+  // Population bars (not sub-events) whose rendered rect intersects the marquee.
+  const popIdsInClientRect = useCallback((x0: number, y0: number, x1: number, y1: number): string[] => {
+    const el = laneAreaRef.current;
+    if (!el) return [];
+    const left = Math.min(x0, x1), right = Math.max(x0, x1);
+    const top = Math.min(y0, y1), bottom = Math.max(y0, y1);
+    const ids: string[] = [];
+    el.querySelectorAll<HTMLElement>('[data-pop-id]:not([data-ev-id])').forEach(node => {
+      const r = node.getBoundingClientRect();
+      if (r.left < right && r.right > left && r.top < bottom && r.bottom > top) {
+        const id = node.dataset.popId;
+        if (id) ids.push(id);
+      }
+    });
+    return ids;
+  }, []);
 
   // --- Auto-scroll to today on mount + on scrollToTodayToken change ---
   const didScrollRef = useRef(false);
@@ -278,6 +316,7 @@ export default function Timeline(props: TimelineProps) {
     if (dragRef.current?.longPressTimer) clearTimeout(dragRef.current.longPressTimer);
     dragRef.current = null;
     setDragPreview(null);
+    setMarquee(null);
   }, []);
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
@@ -290,6 +329,12 @@ export default function Timeline(props: TimelineProps) {
     if (intent.kind === 'none') {
       onDeselect();
       return;
+    }
+
+    // Shift-drag on empty canvas → rubber-band multi-select instead of creating an
+    // experiment. (Only mouse/pen carry a shift modifier; touch keeps create-on-long-press.)
+    if (intent.kind === 'create-pop' && e.shiftKey && e.pointerType !== 'touch') {
+      intent = { kind: 'marquee' };
     }
 
     // Option-drag duplicates whatever you're grabbing — uniform across bars and events.
@@ -383,6 +428,10 @@ export default function Timeline(props: TimelineProps) {
       }
       st.active = true;
     }
+    // Mouse shift-drag that just moved: escalate to an active marquee selection.
+    if (st.pointerType !== 'touch' && st.mode.kind === 'marquee' && moved && !st.active) {
+      st.active = true;
+    }
     // Mouse on empty space / inside-isolated-bar that just moved: escalate to create-pop / create-event
     if (st.pointerType !== 'touch' && (st.mode.kind === 'create-pop' || st.mode.kind === 'create-event') && moved && !st.active) {
       st.active = true;
@@ -402,7 +451,9 @@ export default function Timeline(props: TimelineProps) {
     st.currentDH = dh;
 
     const m = st.mode;
-    if (m.kind === 'create-pop') {
+    if (m.kind === 'marquee') {
+      setMarquee(clientRectToLocal(st.startClient.x, st.startClient.y, e.clientX, e.clientY));
+    } else if (m.kind === 'create-pop') {
       const sd = st.startDH;
       const a = sd.date <= dh.date ? sd : dh;
       const b = sd.date <= dh.date ? dh : sd;
@@ -450,7 +501,7 @@ export default function Timeline(props: TimelineProps) {
     } else if (m.kind === 'resize-event') {
       onResizeEvent(m.evId, m.edge, dh.date, dh.hour);
     }
-  }, [clientToDH, clientToLane, isolatedExperimentId, laneByPop, onMovePop, onMoveEvent, onResizePop, onResizeEvent, onSetPopLane, onReparentEvent]);
+  }, [clientToDH, clientToLane, clientRectToLocal, isolatedExperimentId, laneByPop, onMovePop, onMoveEvent, onResizePop, onResizeEvent, onSetPopLane, onReparentEvent]);
 
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     const st = dragRef.current;
@@ -461,7 +512,10 @@ export default function Timeline(props: TimelineProps) {
 
     if (st.active) {
       const dh = st.currentDH;
-      if (m.kind === 'create-pop') {
+      if (m.kind === 'marquee') {
+        // Real drag → select enclosed experiments; a shift-click with no drag clears.
+        onMarqueeSelect(st.moved ? popIdsInClientRect(st.startClient.x, st.startClient.y, e.clientX, e.clientY) : []);
+      } else if (m.kind === 'create-pop') {
         // Only create on real drag — single click on empty space is a no-op now.
         if (st.moved) {
           const sd = st.startDH;
@@ -496,16 +550,17 @@ export default function Timeline(props: TimelineProps) {
           const popId = m.popId;
           const evEl = target.closest('[data-ev-id]') as HTMLElement | null;
           if (evEl) onSelectEvent(evId, popId, evEl.getBoundingClientRect());
-        } else if (m.kind === 'create-pop' || m.kind === 'create-event') {
-          // Click on empty canvas (no drag) → tear down any open popover or details.
+        } else if (m.kind === 'create-pop' || m.kind === 'create-event' || m.kind === 'marquee') {
+          // Click on empty canvas (no drag) → tear down any open popover, details, or selection.
           onDeselect();
         }
       }
     }
 
     setDragPreview(null);
+    setMarquee(null);
     dragRef.current = null;
-  }, [onCreatePop, onCreateEvent, onSelectPop, onSelectEvent, onDeselect]);
+  }, [onCreatePop, onCreateEvent, onSelectPop, onSelectEvent, onDeselect, onMarqueeSelect, popIdsInClientRect]);
 
   const onPointerCancel = useCallback(() => {
     cancelDrag();
@@ -723,6 +778,7 @@ export default function Timeline(props: TimelineProps) {
               const lane = laneByPop.get(pop.id) ?? 0;
               const range = dateRangeToPx(pop.startDate, pop.startHour, pop.endDate, pop.endHour);
               const isSel = selectedPopId === pop.id && !selectedEventId && !isolatedExperimentId;
+              const isMulti = selectedPopIds.includes(pop.id);
               const isIsolated = isolatedExperimentId === pop.id;
               const isDimmed = isolatedExperimentId !== null && !isIsolated;
               const popEvents = events.filter(ev => ev.populationId === pop.id);
@@ -745,7 +801,7 @@ export default function Timeline(props: TimelineProps) {
                 <div
                   key={pop.id}
                   data-pop-id={pop.id}
-                  className={`absolute rounded-xl overflow-visible transition-opacity ${isSel ? 'ring-2 ring-offset-2 ring-indigo-500 shadow-lg z-20' : 'z-10'} ${isDimmed ? 'opacity-25 pointer-events-none' : ''} ${isIsolated ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+                  className={`absolute rounded-xl overflow-visible transition-opacity ${isSel ? 'ring-2 ring-offset-2 ring-indigo-500 shadow-lg z-20' : isMulti ? 'ring-2 ring-offset-2 ring-indigo-400 shadow-lg z-20' : 'z-10'} ${isDimmed ? 'opacity-25 pointer-events-none' : ''} ${isIsolated ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
                   style={{
                     ...barStyle,
                     backgroundColor: pop.color + '15',
@@ -860,6 +916,14 @@ export default function Timeline(props: TimelineProps) {
                 />
               );
             })()}
+
+            {/* Shift-drag marquee rectangle */}
+            {marquee && (
+              <div
+                className="absolute z-30 pointer-events-none rounded-md bg-indigo-500/10 border-2 border-indigo-400"
+                style={marquee}
+              />
+            )}
           </div>
         </div>
       </div>
