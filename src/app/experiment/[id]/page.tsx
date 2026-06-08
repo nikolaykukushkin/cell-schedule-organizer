@@ -46,7 +46,7 @@ export default function ExperimentPage() {
   if (!experiment) return null;
 
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex flex-col h-dvh overflow-hidden overscroll-none">
       <div className="border-b border-gray-200 bg-white px-4 py-2 flex items-center gap-3">
         <Link
           href="/"

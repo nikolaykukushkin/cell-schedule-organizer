@@ -666,7 +666,12 @@ export default function Timeline(props: TimelineProps) {
       <div
         ref={scrollerRef}
         className="absolute inset-0 overflow-auto"
-        style={{ touchAction: isHoriz ? 'pan-x' : 'pan-y' }}
+        // Allow native single-finger panning along BOTH axes so the user can drag to
+        // scroll through time *and* across lanes. Restricting to one axis (pan-x/pan-y)
+        // left the orthogonal direction unscrollable by touch — in landscape the blocked
+        // vertical drag chained to the document and revealed the browser chrome.
+        // `overscroll-contain` keeps that chaining from happening at the scroll boundary.
+        style={{ touchAction: 'pan-x pan-y', overscrollBehavior: 'contain' }}
       >
         {/* Inner content: time axis × cross axis. */}
         <div
