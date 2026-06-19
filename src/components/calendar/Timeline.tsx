@@ -203,24 +203,6 @@ export default function Timeline(props: TimelineProps) {
   const [zoomX, setZoomX] = useState(1);
   const [zoomY, setZoomY] = useState(1);
 
-  const scrollerRef = useRef<HTMLDivElement>(null);
-  // Remember the viewport's focal point (center, as a fraction of total content) just
-  // before a zoom change so we can re-anchor scroll afterwards — otherwise the content
-  // rescales but scrollLeft/Top stay fixed and the view appears to jump.
-  const zoomFocusRef = useRef<{ fx: number; fy: number } | null>(null);
-  const captureZoomFocus = useCallback(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    const sw = el.scrollWidth || 1;
-    const sh = el.scrollHeight || 1;
-    zoomFocusRef.current = {
-      fx: (el.scrollLeft + el.clientWidth / 2) / sw,
-      fy: (el.scrollTop + el.clientHeight / 2) / sh,
-    };
-  }, []);
-  const stepZoomX = useCallback((dir: 1 | -1) => { captureZoomFocus(); setZoomX(z => clampZoom(dir > 0 ? z * ZOOM_STEP : z / ZOOM_STEP)); }, [captureZoomFocus]);
-  const stepZoomY = useCallback((dir: 1 | -1) => { captureZoomFocus(); setZoomY(z => clampZoom(dir > 0 ? z * ZOOM_STEP : z / ZOOM_STEP)); }, [captureZoomFocus]);
-
   const geom = useMemo(() => {
     const base = geomFor(axis, isMobile);
     const timeZoom = axis === 'horizontal' ? zoomX : zoomY;
@@ -228,7 +210,23 @@ export default function Timeline(props: TimelineProps) {
     return { ...base, dayPx: base.dayPx * timeZoom, lanePx: base.lanePx * laneZoom };
   }, [axis, isMobile, zoomX, zoomY]);
 
-  // After a zoom rescales the content, re-center on the captured focal point (before paint,
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  // Remember the viewport's focal point (centre, as a fraction of total content) just
+  // before a zoom so we can re-anchor scroll afterwards — otherwise the content rescales
+  // while scrollLeft/Top stay fixed and the view appears to jump.
+  const zoomFocusRef = useRef<{ fx: number; fy: number } | null>(null);
+  const captureZoomFocus = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    zoomFocusRef.current = {
+      fx: (el.scrollLeft + el.clientWidth / 2) / Math.max(1, el.scrollWidth),
+      fy: (el.scrollTop + el.clientHeight / 2) / Math.max(1, el.scrollHeight),
+    };
+  }, []);
+  const stepZoomX = useCallback((dir: 1 | -1) => { captureZoomFocus(); setZoomX(z => clampZoom(dir > 0 ? z * ZOOM_STEP : z / ZOOM_STEP)); }, [captureZoomFocus]);
+  const stepZoomY = useCallback((dir: 1 | -1) => { captureZoomFocus(); setZoomY(z => clampZoom(dir > 0 ? z * ZOOM_STEP : z / ZOOM_STEP)); }, [captureZoomFocus]);
+
+  // After a zoom rescales the content, re-centre on the captured focal point (before paint,
   // so there's no visible jump). No-op for any geom change that wasn't a zoom click.
   useLayoutEffect(() => {
     const f = zoomFocusRef.current;
@@ -311,13 +309,18 @@ export default function Timeline(props: TimelineProps) {
   }, []);
 
   // --- Auto-scroll to today on mount + on scrollToTodayToken change ---
+  // Deliberately NOT keyed on geom.dayPx: a zoom must not yank the view back to today —
+  // zooming re-anchors on the viewport centre (see the focus-restore layout effect above).
+  // dayPx is read from a ref so it stays current without being a dependency.
   const didScrollRef = useRef(false);
+  const dayPxRef = useRef(geom.dayPx);
+  useEffect(() => { dayPxRef.current = geom.dayPx; }, [geom.dayPx]);
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
     const todayIdx = daysBetween(origin, todayStr);
     if (todayIdx < 0 || todayIdx >= dayCount) return;
-    const todayPx = todayIdx * geom.dayPx;
+    const todayPx = todayIdx * dayPxRef.current;
     const smooth = didScrollRef.current;
     if (axis === 'horizontal') {
       el.scrollTo({ left: Math.max(0, todayPx - el.clientWidth / 3), behavior: smooth ? 'smooth' : 'auto' });
@@ -325,7 +328,7 @@ export default function Timeline(props: TimelineProps) {
       el.scrollTo({ top: Math.max(0, todayPx - el.clientHeight / 3), behavior: smooth ? 'smooth' : 'auto' });
     }
     didScrollRef.current = true;
-  }, [axis, dayCount, geom.dayPx, origin, todayStr, scrollToTodayToken]);
+  }, [axis, dayCount, origin, todayStr, scrollToTodayToken]);
 
   // --- Floating month label, driven by scroll position ---
   const [floatingLabel, setFloatingLabel] = useState('');
