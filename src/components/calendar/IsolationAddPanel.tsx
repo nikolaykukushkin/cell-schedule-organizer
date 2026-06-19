@@ -9,6 +9,7 @@ interface Props {
   isMobile: boolean;
   onAddQuickEvent: (label: string, color: string, durationH: number, offsetFromEndH: number) => void;
   onCreateNew: () => void;
+  onClose: () => void;
 }
 
 /**
@@ -17,7 +18,7 @@ interface Props {
  * the bar — either by picking an existing template or creating a fresh blank event.
  */
 export default function IsolationAddPanel({
-  population, eventTemplates, isMobile, onAddQuickEvent, onCreateNew,
+  population, eventTemplates, isMobile, onAddQuickEvent, onCreateNew, onClose,
 }: Props) {
   const containerClasses = isMobile
     ? 'fixed inset-x-2 bottom-3 z-40 bg-white rounded-2xl shadow-2xl border border-slate-200 p-3'
@@ -27,9 +28,17 @@ export default function IsolationAddPanel({
     <div className={containerClasses}>
       <div className="flex items-center gap-2 mb-2.5">
         <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 ring-1 ring-black/5" style={{ backgroundColor: population.color }} />
-        <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider truncate">
+        <div className="flex-1 text-[11px] font-bold text-slate-500 uppercase tracking-wider truncate">
           Add event · {population.name || 'Untitled'}
         </div>
+        <button
+          onClick={onClose}
+          aria-label="Dismiss add-event pane"
+          title="Dismiss"
+          className="-mr-1 w-6 h-6 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors flex-shrink-0"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M12 4L4 12M4 4L12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+        </button>
       </div>
 
       <div className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden">

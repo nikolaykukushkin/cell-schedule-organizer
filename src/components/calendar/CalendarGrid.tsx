@@ -86,6 +86,9 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   // popover selection; populated only by the rubber-band gesture.
   const [selectedPopIds, setSelectedPopIds] = useState<string[]>([]);
   const [isolatedExperimentId, setIsolatedExperimentId] = useState<string | null>(null);
+  // Whether the floating "Add event" pane has been dismissed for the current isolation
+  // session. Reset to false whenever a (different) population is isolated.
+  const [addPanelDismissed, setAddPanelDismissed] = useState(false);
   const [editingFullPanel, setEditingFullPanel] = useState(false);
   const editingFullPanelRef = useRef(editingFullPanel);
   useEffect(() => { editingFullPanelRef.current = editingFullPanel; }, [editingFullPanel]);
@@ -369,6 +372,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       if (prev && prev.kind === 'pop' && prev.popId === popId && editingFullPanelRef.current) {
         setEditingFullPanel(false);
         setIsolatedExperimentId(popId);
+        setAddPanelDismissed(false);
         return null;
       }
       const popEl = document.querySelector(`[data-pop-id="${popId}"]`) as HTMLElement | null;
@@ -408,6 +412,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const handleEnterIsolationFor = useCallback((popId: string) => {
     setIsolatedExperimentId(popId);
     setEditingFullPanel(false);
+    setAddPanelDismissed(false);
     setPopover(null);
   }, []);
 
@@ -819,7 +824,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       )}
 
       {/* Floating add-event pane — auto-surfaced over the dimmed area in isolation mode */}
-      {isolatedExperimentId && !editingFullPanel && (() => {
+      {isolatedExperimentId && !editingFullPanel && !addPanelDismissed && (() => {
         const isoPop = displayPopulations.find(p => p.id === isolatedExperimentId);
         if (!isoPop) return null;
         return (
@@ -831,6 +836,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
               handleAddQuickEvent(isolatedExperimentId, label, color, durationH, offsetFromEndH)
             }
             onCreateNew={() => handleCreateBlankEvent(isolatedExperimentId)}
+            onClose={() => setAddPanelDismissed(true)}
           />
         );
       })()}
