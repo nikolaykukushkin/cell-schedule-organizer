@@ -803,11 +803,18 @@ export default function Timeline(props: TimelineProps) {
               <div
                 key={t.date}
                 className={`absolute ${t.isWeekend ? 'bg-slate-200/55' : ''}`}
-                style={
-                  isHoriz
-                    ? { left: t.px, top: 0, width: geom.dayPx, height: '100%', borderLeft: t.isMonthStart ? '2px solid' : '1px solid', borderColor: t.isMonthStart ? 'rgb(129 140 248 / 0.55)' : 'rgb(203 213 225 / 0.85)' }
-                    : { top: t.px, left: 0, height: geom.dayPx, width: '100%', borderTop: t.isMonthStart ? '2px solid' : '1px solid', borderColor: t.isMonthStart ? 'rgb(129 140 248 / 0.55)' : 'rgb(203 213 225 / 0.85)' }
-                }
+                style={(() => {
+                  // Keep the border fully in the shorthand (width + style + color in one
+                  // property). Mixing `borderLeft: '2px solid'` with a separate `borderColor`
+                  // is a shorthand/longhand conflict that React re-applies to every gridline
+                  // on each re-render — a flood that janks (and can crash) mobile on zoom.
+                  const edge = t.isMonthStart
+                    ? '2px solid rgb(129 140 248 / 0.55)'
+                    : '1px solid rgb(203 213 225 / 0.85)';
+                  return isHoriz
+                    ? { left: t.px, top: 0, width: geom.dayPx, height: '100%', borderLeft: edge }
+                    : { top: t.px, left: 0, height: geom.dayPx, width: '100%', borderTop: edge };
+                })()}
               />
             ))}
 
