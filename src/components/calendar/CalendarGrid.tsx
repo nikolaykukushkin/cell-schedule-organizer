@@ -30,6 +30,8 @@ interface PopoverState {
   id: string;
   popId: string;
   anchor: DOMRect;
+  /** Event popover only: open with the name field in inline-edit mode (double-click rename). */
+  renaming?: boolean;
 }
 
 function rangesOverlap(a: CellPopulation, b: CellPopulation): boolean {
@@ -62,6 +64,33 @@ function computeLanes(populations: CellPopulation[]): { laneByPop: Map<string, n
   return { laneByPop: result, totalLanes: Math.max(1, laneRanges.length) };
 }
 
+/** Pick a starting lane for a freshly created population so same-operator bars cluster
+ *  together vertically: settle in the nearest free lane to the same-operator bar that's
+ *  nearest in time. Returns undefined when there's no same-operator bar to anchor on, so
+ *  the caller leaves the lane to greedy auto-layout. */
+function pickClusteredLane(populations: CellPopulation[], newPop: CellPopulation): number | undefined {
+  const op = storage.normalizeOperatorId(newPop.experimenter || '');
+  if (!op) return undefined;
+  const sameOp = populations.filter(p => storage.normalizeOperatorId(p.experimenter || '') === op);
+  if (sameOp.length === 0) return undefined;
+  const { laneByPop } = computeLanes(populations);
+  // Anchor on the same-operator bar nearest in time (ties resolve to the most recently
+  // created one, i.e. latest in the list).
+  const anchor = sameOp.reduce((best, p) =>
+    Math.abs(daysBetween(p.startDate, newPop.startDate)) <= Math.abs(daysBetween(best.startDate, newPop.startDate)) ? p : best
+  );
+  const anchorLane = laneByPop.get(anchor.id) ?? 0;
+  const blocked = (l: number) =>
+    populations.some(o => (laneByPop.get(o.id) ?? 0) === l && rangesOverlap(o, newPop));
+  // Search outward from the anchor's lane for the nearest free lane (preferring below).
+  for (let d = 0; d <= populations.length + 1; d++) {
+    if (!blocked(anchorLane + d)) return anchorLane + d;
+    const up = anchorLane - d;
+    if (up >= 0 && !blocked(up)) return up;
+  }
+  return undefined;
+}
+
 export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: CalendarGridProps) {
   const [populations, setPopulations] = useState<CellPopulation[]>(() =>
     storage.getPopulations(experimentId)
@@ -90,8 +119,6 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   // session. Reset to false whenever a (different) population is isolated.
   const [addPanelDismissed, setAddPanelDismissed] = useState(false);
   const [editingFullPanel, setEditingFullPanel] = useState(false);
-  const editingFullPanelRef = useRef(editingFullPanel);
-  useEffect(() => { editingFullPanelRef.current = editingFullPanel; }, [editingFullPanel]);
 
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [newDialogRange, setNewDialogRange] = useState<{ start: string; end: string } | null>(null);
@@ -233,15 +260,22 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   const handleSelectPop = useCallback((popId: string, anchor: DOMRect) => {
     setSelectedPopIds([]);
     setPopover(prev => {
-      // Switching to a different bar collapses the open details back to a mini popover.
-      if (prev && prev.popId !== popId) setEditingFullPanel(false);
+      // Bar already focused → leave the popover untouched. A single click that's really the
+      // first half of a double-click (→ event editor) then doesn't tear down and re-open the
+      // mini window, so it never flashes.
+      if (prev && prev.kind === 'pop' && prev.popId === popId) return prev;
+      // Switching from another bar/event collapses any open details back to a mini popover.
+      setEditingFullPanel(false);
       return { kind: 'pop', id: popId, popId, anchor };
     });
   }, []);
   const handleSelectEvent = useCallback((evId: string, popId: string, anchor: DOMRect) => {
     setSelectedPopIds([]);
     setPopover(prev => {
-      if (prev && prev.id !== evId) setEditingFullPanel(false);
+      // Event already focused → leave the popover untouched so the first click of a
+      // double-click (→ rename) doesn't tear down and re-open the mini window (a flash).
+      if (prev && prev.kind === 'event' && prev.id === evId) return prev;
+      setEditingFullPanel(false);
       return { kind: 'event', id: evId, popId, anchor };
     });
   }, []);
@@ -293,39 +327,29 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   }, []);
 
   const handleSetPopLane = useCallback((popId: string, lane: number) => {
-    const targetLane = Math.max(0, lane);
+    const desiredLane = Math.max(0, lane);
     setPopulations(prev => {
       const target = prev.find(p => p.id === popId);
       if (!target) return prev;
       const { laneByPop } = computeLanes(prev);
       const oldLane = laneByPop.get(popId) ?? 0;
-      if (oldLane === targetLane) return prev;
-      const dir = targetLane > oldLane ? 1 : -1;
+      if (oldLane === desiredLane) return prev;
+      const dir = desiredLane > oldLane ? 1 : -1;
 
-      // Cascade: place popId at targetLane; any pop already there with a date overlap
-      // gets pushed one lane in the direction of motion. Recurse.
-      const updates = new Map<string, number>();
-      const popById = new Map(prev.map(p => [p.id, p]));
-      const visit = (id: string, l: number) => {
-        if (updates.get(id) === l) return;
-        updates.set(id, l);
-        const me = popById.get(id);
-        if (!me) return;
-        for (const other of prev) {
-          if (other.id === id) continue;
-          const otherLane = updates.has(other.id) ? updates.get(other.id)! : (laneByPop.get(other.id) ?? 0);
-          if (otherLane !== l) continue;
-          if (!rangesOverlap(me, other)) continue;
-          visit(other.id, l + dir);
-        }
-      };
-      visit(popId, targetLane);
+      // Bars never nudge each other. A lane is blocked when another date-overlapping
+      // bar already sits there; the dragged bar then skips over it and settles in the
+      // next free lane along the drag direction. Dragging up into a wall (no free lane
+      // above) holds the bar in place — the "gentle resistance" before a skip.
+      const blocked = (l: number) =>
+        prev.some(o => o.id !== popId && (laneByPop.get(o.id) ?? 0) === l && rangesOverlap(target, o));
 
-      // If the cascade pushed something into a negative lane, shift everything down.
-      const minLane = Math.min(0, ...updates.values());
-      const shift = minLane < 0 ? -minLane : 0;
-
-      return prev.map(p => updates.has(p.id) ? { ...p, lane: updates.get(p.id)! + shift } : p);
+      let landing = desiredLane;
+      while (blocked(landing)) {
+        landing += dir;
+        if (landing < 0) return prev;
+      }
+      if (landing === oldLane) return prev;
+      return prev.map(p => (p.id === popId ? { ...p, lane: landing } : p));
     });
   }, []);
 
@@ -367,18 +391,12 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   }, []);
 
   const handleOpenPopDetails = useCallback((popId: string) => {
-    // Second double-click on the bar whose details are already open → escalate into isolation.
-    setPopover(prev => {
-      if (prev && prev.kind === 'pop' && prev.popId === popId && editingFullPanelRef.current) {
-        setEditingFullPanel(false);
-        setIsolatedExperimentId(popId);
-        setAddPanelDismissed(false);
-        return null;
-      }
-      const popEl = document.querySelector(`[data-pop-id="${popId}"]`) as HTMLElement | null;
-      setEditingFullPanel(true);
-      return { kind: 'pop', id: popId, popId, anchor: popEl?.getBoundingClientRect() ?? new DOMRect() };
-    });
+    // Double-click a bar → straight into the event editor (isolation). Extended details are
+    // reachable only via "Open details" in the mini popover.
+    setEditingFullPanel(false);
+    setAddPanelDismissed(false);
+    setIsolatedExperimentId(popId);
+    setPopover(null);
   }, []);
 
   const handleAddQuickEvent = useCallback((popId: string, label: string, color: string, durationH: number, offsetFromEndH: number) => {
@@ -416,10 +434,19 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     setPopover(null);
   }, []);
 
-  const handleOpenEventDetails = useCallback((evId: string, popId: string) => {
-    const evEl = document.querySelector(`[data-ev-id="${evId}"]`) as HTMLElement | null;
-    setPopover({ kind: 'event', id: evId, popId, anchor: evEl?.getBoundingClientRect() ?? new DOMRect() });
-    setEditingFullPanel(true);
+  // Double-click an event → open its mini popover with the name field in inline-edit mode.
+  // Extended details are reachable only via "Edit details" in that popover.
+  const handleRenameEvent = useCallback((evId: string, popId: string) => {
+    setEditingFullPanel(false);
+    setPopover(prev => {
+      if (prev && prev.kind === 'event' && prev.id === evId) return { ...prev, renaming: true };
+      const evEl = document.querySelector(`[data-ev-id="${evId}"]`) as HTMLElement | null;
+      return { kind: 'event', id: evId, popId, anchor: evEl?.getBoundingClientRect() ?? new DOMRect(), renaming: true };
+    });
+  }, []);
+
+  const handleRenameEventLabel = useCallback((evId: string, label: string) => {
+    setEvents(prev => prev.map(e => (e.id === evId ? { ...e, label } : e)));
   }, []);
 
   const handleResizePop = useCallback((popId: string, edge: 'start' | 'end', date: string, hour: number) => {
@@ -599,7 +626,10 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       startDate: newDialogRange.start, startHour: 0,
       endDate: newDialogRange.end, endHour: 23,
     };
-    setPopulations(prev => [...prev, pop]);
+    // Cluster next to the operator's nearest-in-time bar; fall back to greedy auto-layout.
+    const clusterLane = pickClusteredLane(populationsRef.current, pop);
+    const placed = clusterLane === undefined ? pop : { ...pop, lane: clusterLane };
+    setPopulations(prev => [...prev, placed]);
     setShowNewDialog(false);
     setNewDialogRange(null);
     if (storage.ensureOperator(pop.experimenter)) setOperators(storage.getOperators());
@@ -761,7 +791,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         onResizeEvent={handleResizeEvent}
         onSelectEvent={handleSelectEvent}
         onDuplicateEvent={handleDuplicateEvent}
-        onOpenEventDetails={handleOpenEventDetails}
+        onRenameEvent={handleRenameEvent}
         onReparentEvent={handleReparentEvent}
         onDeselect={closePopover}
         onMarqueeSelect={handleMarqueeSelect}
@@ -776,6 +806,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           <ExperimentPopover
             kind="pop"
             anchor={popover.anchor}
+            anchorSelector={`[data-pop-id="${popover.popId}"]`}
             isMobile={isMobile}
             population={popoverPopDisplay!}
             eventCount={popoverEventCount}
@@ -793,8 +824,11 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           <ExperimentPopover
             kind="event"
             anchor={popover.anchor}
+            anchorSelector={`[data-ev-id="${popover.id}"]`}
             isMobile={isMobile}
             subEvent={popoverEv}
+            startRenaming={!!popover.renaming}
+            onRename={(label) => handleRenameEventLabel(popover.id, label)}
             onEditDetails={() => setEditingFullPanel(true)}
             onDelete={() => handleDeleteEvent(popover.id)}
             onClose={closePopover}

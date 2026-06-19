@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CellPopulation, SubEvent, platesAbbrev } from '@/types';
 import { addDays, daysBetween } from '@/lib/dates';
 
@@ -54,7 +54,7 @@ export interface TimelineProps {
   onResizeEvent: (evId: string, edge: 'start' | 'end', date: string, hour: number) => void;
   onSelectEvent: (evId: string, popId: string, anchor: DOMRect) => void;
   onDuplicateEvent: (evId: string) => string | null;
-  onOpenEventDetails: (evId: string, popId: string) => void;
+  onRenameEvent: (evId: string, popId: string) => void;
   /** Move an event into a different parent population, preserving its duration and
    *  placing its start at the given date/hour. */
   onReparentEvent: (evId: string, newPopId: string, anchorDate: string, anchorHour: number) => void;
@@ -90,6 +90,52 @@ function geomFor(axis: Axis, isMobile: boolean): Geom {
   };
 }
 
+const ZOOM_STEP = 1.25;
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 3;
+const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+
+/** Two stacked zoom pills — one scales the horizontal axis, one the vertical axis. */
+function ZoomControls({ zoomX, zoomY, onZoomX, onZoomY }: {
+  zoomX: number; zoomY: number;
+  onZoomX: (dir: 1 | -1) => void; onZoomY: (dir: 1 | -1) => void;
+}) {
+  const row = (label: string, value: number, onStep: (dir: 1 | -1) => void, horizontal: boolean) => (
+    <div className="flex items-center gap-0.5 bg-white/90 backdrop-blur rounded-full shadow-sm border border-slate-200 px-1 py-0.5">
+      <span title={label} className="w-5 h-5 flex items-center justify-center text-slate-500">
+        {horizontal ? (
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2.5 8h11M2.5 8l2-2M2.5 8l2 2M13.5 8l-2-2M13.5 8l-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        ) : (
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2.5v11M8 2.5l-2 2M8 2.5l2 2M8 13.5l-2-2M8 13.5l2-2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        )}
+      </span>
+      <button
+        onClick={() => onStep(-1)}
+        disabled={value <= ZOOM_MIN + 1e-6}
+        aria-label={`${label} out`}
+        className="w-6 h-6 flex items-center justify-center rounded-full text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+      </button>
+      <span className="text-[10px] font-bold text-slate-500 w-9 text-center tabular-nums">{Math.round(value * 100)}%</span>
+      <button
+        onClick={() => onStep(1)}
+        disabled={value >= ZOOM_MAX - 1e-6}
+        aria-label={`${label} in`}
+        className="w-6 h-6 flex items-center justify-center rounded-full text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+      </button>
+    </div>
+  );
+  return (
+    <div className="absolute top-2 right-2 z-30 flex flex-col gap-1.5">
+      {row('Zoom horizontal', zoomX, onZoomX, true)}
+      {row('Zoom vertical', zoomY, onZoomY, false)}
+    </div>
+  );
+}
+
 function eventDurationHours(ev: SubEvent): number {
   return daysBetween(ev.startDate, ev.endDate) * 24 + (ev.endHour + 1 - ev.startHour);
 }
@@ -122,7 +168,6 @@ interface DragState {
 type DragMode =
   | { kind: 'none' }
   | { kind: 'marquee' }
-  | { kind: 'create-pop' }
   | { kind: 'create-event'; popId: string }
   | { kind: 'move-pop'; popId: string }
   | { kind: 'move-event'; evId: string; popId: string }
@@ -139,7 +184,7 @@ export default function Timeline(props: TimelineProps) {
     onCreatePop, onMovePop, onResizePop, onSelectPop,
     onSetPopLane, onDuplicatePop, onOpenPopDetails,
     onCreateEvent, onMoveEvent, onResizeEvent, onSelectEvent,
-    onDuplicateEvent, onOpenEventDetails, onReparentEvent,
+    onDuplicateEvent, onRenameEvent, onReparentEvent,
     onDeselect, onMarqueeSelect, onExitIsolation, onLayoutChange,
     scrollToTodayToken,
   } = props;
@@ -152,7 +197,47 @@ export default function Timeline(props: TimelineProps) {
     return () => window.removeEventListener('resize', check);
   }, []);
 
-  const geom = useMemo(() => geomFor(axis, isMobile), [axis, isMobile]);
+  // Independent zoom for the screen-horizontal and screen-vertical axes. Which timeline
+  // dimension each maps to depends on orientation: in horizontal mode time runs along X
+  // and lanes stack along Y; in vertical mode it's the reverse.
+  const [zoomX, setZoomX] = useState(1);
+  const [zoomY, setZoomY] = useState(1);
+
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  // Remember the viewport's focal point (center, as a fraction of total content) just
+  // before a zoom change so we can re-anchor scroll afterwards — otherwise the content
+  // rescales but scrollLeft/Top stay fixed and the view appears to jump.
+  const zoomFocusRef = useRef<{ fx: number; fy: number } | null>(null);
+  const captureZoomFocus = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const sw = el.scrollWidth || 1;
+    const sh = el.scrollHeight || 1;
+    zoomFocusRef.current = {
+      fx: (el.scrollLeft + el.clientWidth / 2) / sw,
+      fy: (el.scrollTop + el.clientHeight / 2) / sh,
+    };
+  }, []);
+  const stepZoomX = useCallback((dir: 1 | -1) => { captureZoomFocus(); setZoomX(z => clampZoom(dir > 0 ? z * ZOOM_STEP : z / ZOOM_STEP)); }, [captureZoomFocus]);
+  const stepZoomY = useCallback((dir: 1 | -1) => { captureZoomFocus(); setZoomY(z => clampZoom(dir > 0 ? z * ZOOM_STEP : z / ZOOM_STEP)); }, [captureZoomFocus]);
+
+  const geom = useMemo(() => {
+    const base = geomFor(axis, isMobile);
+    const timeZoom = axis === 'horizontal' ? zoomX : zoomY;
+    const laneZoom = axis === 'horizontal' ? zoomY : zoomX;
+    return { ...base, dayPx: base.dayPx * timeZoom, lanePx: base.lanePx * laneZoom };
+  }, [axis, isMobile, zoomX, zoomY]);
+
+  // After a zoom rescales the content, re-center on the captured focal point (before paint,
+  // so there's no visible jump). No-op for any geom change that wasn't a zoom click.
+  useLayoutEffect(() => {
+    const f = zoomFocusRef.current;
+    const el = scrollerRef.current;
+    if (!f || !el) return;
+    zoomFocusRef.current = null;
+    el.scrollLeft = f.fx * el.scrollWidth - el.clientWidth / 2;
+    el.scrollTop = f.fy * el.scrollHeight - el.clientHeight / 2;
+  }, [geom.dayPx, geom.lanePx]);
 
   // Total content size along the time axis (scroll length)
   const timeAxisPx = dayCount * geom.dayPx;
@@ -160,11 +245,10 @@ export default function Timeline(props: TimelineProps) {
   // the full viewport minus the header so grid lines extend all the way to the edge.
   const crossAxisPx = Math.max(1, totalLanes) * (geom.lanePx + geom.laneGap) + geom.laneGap;
 
-  const scrollerRef = useRef<HTMLDivElement>(null);
   const laneAreaRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
-  // Live preview for create-pop / create-event drags
-  const [dragPreview, setDragPreview] = useState<{ kind: 'pop' | 'event'; popId?: string; startDate: string; startHour: number; endDate: string; endHour: number } | null>(null);
+  // Live preview rectangle for an event-creation drag (inside an isolated bar).
+  const [dragPreview, setDragPreview] = useState<{ kind: 'event'; popId?: string; startDate: string; startHour: number; endDate: string; endHour: number } | null>(null);
   // Live rubber-band rectangle for shift-drag multi-select (lane-area-local pixels).
   const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
 
@@ -185,14 +269,14 @@ export default function Timeline(props: TimelineProps) {
     return { date: addDays(origin, dayIndex), hour };
   }, [axis, dayCount, geom.dayPx, origin]);
 
-  // Cross-axis pointer position → lane index (used for vertical drag-reorder).
-  const clientToLane = useCallback((clientX: number, clientY: number): number => {
+  // Cross-axis pointer position → fractional lane (used for vertical drag-reorder, where
+  // the fractional part drives the "gentle resistance" hysteresis).
+  const clientToLaneFloat = useCallback((clientX: number, clientY: number): number => {
     const el = laneAreaRef.current;
     if (!el) return 0;
     const rect = el.getBoundingClientRect();
     const posCross = axis === 'horizontal' ? clientY - rect.top : clientX - rect.left;
-    const lane = Math.floor((posCross - geom.laneGap) / (geom.lanePx + geom.laneGap));
-    return Math.max(0, lane);
+    return (posCross - geom.laneGap) / (geom.lanePx + geom.laneGap);
   }, [axis, geom.lanePx, geom.laneGap]);
 
   // --- Marquee (shift-drag multi-select) geometry ---
@@ -259,7 +343,7 @@ export default function Timeline(props: TimelineProps) {
     update();
     el.addEventListener('scroll', update);
     return () => el.removeEventListener('scroll', update);
-  }, [axis, geom.dayPx, origin, dayCount, onLayoutChange]);
+  }, [axis, geom.dayPx, geom.lanePx, origin, dayCount, onLayoutChange]);
 
   // --- Pointer event handling (unified for mouse + touch) ---
 
@@ -308,8 +392,10 @@ export default function Timeline(props: TimelineProps) {
       // Outside the isolated experiment → no-op
       return { kind: 'none' };
     }
+    // Drag on empty space → rubber-band selection. Experiments are created only by
+    // double-clicking empty space (or duplicating an existing one), never by drag.
     void dh;
-    return { kind: 'create-pop' };
+    return { kind: 'marquee' };
   }, [isolatedExperimentId]);
 
   const cancelDrag = useCallback(() => {
@@ -329,12 +415,6 @@ export default function Timeline(props: TimelineProps) {
     if (intent.kind === 'none') {
       onDeselect();
       return;
-    }
-
-    // Shift-drag on empty canvas → rubber-band multi-select instead of creating an
-    // experiment. (Only mouse/pen carry a shift modifier; touch keeps create-on-long-press.)
-    if (intent.kind === 'create-pop' && e.shiftKey && e.pointerType !== 'touch') {
-      intent = { kind: 'marquee' };
     }
 
     // Option-drag duplicates whatever you're grabbing — uniform across bars and events.
@@ -383,13 +463,9 @@ export default function Timeline(props: TimelineProps) {
           dragRef.current.mode = { kind: 'move-event', evId: dragRef.current.mode.evId, popId: dragRef.current.mode.popId };
         }
         try { laneAreaRef.current?.setPointerCapture(e.pointerId); } catch {}
-        if (dragRef.current.mode.kind === 'create-pop' || dragRef.current.mode.kind === 'create-event') {
+        if (dragRef.current.mode.kind === 'create-event') {
           const sd = dragRef.current.startDH;
-          if (dragRef.current.mode.kind === 'create-pop') {
-            setDragPreview({ kind: 'pop', startDate: sd.date, startHour: sd.hour, endDate: sd.date, endHour: sd.hour });
-          } else {
-            setDragPreview({ kind: 'event', popId: dragRef.current.mode.popId, startDate: sd.date, startHour: sd.hour, endDate: sd.date, endHour: Math.min(23, sd.hour + 3) });
-          }
+          setDragPreview({ kind: 'event', popId: dragRef.current.mode.popId, startDate: sd.date, startHour: sd.hour, endDate: sd.date, endHour: Math.min(23, sd.hour + 3) });
         }
       }, LONG_PRESS_MS);
     } else {
@@ -432,15 +508,11 @@ export default function Timeline(props: TimelineProps) {
     if (st.pointerType !== 'touch' && st.mode.kind === 'marquee' && moved && !st.active) {
       st.active = true;
     }
-    // Mouse on empty space / inside-isolated-bar that just moved: escalate to create-pop / create-event
-    if (st.pointerType !== 'touch' && (st.mode.kind === 'create-pop' || st.mode.kind === 'create-event') && moved && !st.active) {
+    // Mouse inside the isolated bar that just moved: escalate to event creation.
+    if (st.pointerType !== 'touch' && st.mode.kind === 'create-event' && moved && !st.active) {
       st.active = true;
       const sd = st.startDH;
-      if (st.mode.kind === 'create-pop') {
-        setDragPreview({ kind: 'pop', startDate: sd.date, startHour: sd.hour, endDate: sd.date, endHour: sd.hour });
-      } else {
-        setDragPreview({ kind: 'event', popId: st.mode.popId, startDate: sd.date, startHour: sd.hour, endDate: sd.date, endHour: sd.hour });
-      }
+      setDragPreview({ kind: 'event', popId: st.mode.popId, startDate: sd.date, startHour: sd.hour, endDate: sd.date, endHour: sd.hour });
     }
 
     if (!st.active) return;
@@ -453,11 +525,6 @@ export default function Timeline(props: TimelineProps) {
     const m = st.mode;
     if (m.kind === 'marquee') {
       setMarquee(clientRectToLocal(st.startClient.x, st.startClient.y, e.clientX, e.clientY));
-    } else if (m.kind === 'create-pop') {
-      const sd = st.startDH;
-      const a = sd.date <= dh.date ? sd : dh;
-      const b = sd.date <= dh.date ? dh : sd;
-      setDragPreview({ kind: 'pop', startDate: a.date, startHour: a.hour, endDate: b.date, endHour: b.hour });
     } else if (m.kind === 'create-event') {
       const sd = st.startDH;
       const a = (sd.date < dh.date) || (sd.date === dh.date && sd.hour <= dh.hour) ? sd : dh;
@@ -469,8 +536,15 @@ export default function Timeline(props: TimelineProps) {
         st.anchorDate = dh.date;
         onMovePop(m.popId, dayDelta);
       }
-      const targetLane = clientToLane(e.clientX, e.clientY);
+      // Gentle resistance: the bar only leaves its lane once the pointer has travelled
+      // past the lane midpoint by an extra margin, so brushing a neighbour doesn't reorder.
+      const RESIST = 0.4;
+      const laneF = clientToLaneFloat(e.clientX, e.clientY);
       const currentLane = laneByPop.get(m.popId) ?? 0;
+      let targetLane = currentLane;
+      if (laneF >= currentLane + 0.5 + RESIST || laneF <= currentLane - 0.5 - RESIST) {
+        targetLane = Math.max(0, Math.round(laneF));
+      }
       if (targetLane !== currentLane) onSetPopLane(m.popId, targetLane);
     } else if (m.kind === 'move-event') {
       // Detect whether the cursor is over a different parent bar — if so, reparent.
@@ -501,7 +575,7 @@ export default function Timeline(props: TimelineProps) {
     } else if (m.kind === 'resize-event') {
       onResizeEvent(m.evId, m.edge, dh.date, dh.hour);
     }
-  }, [clientToDH, clientToLane, clientRectToLocal, isolatedExperimentId, laneByPop, onMovePop, onMoveEvent, onResizePop, onResizeEvent, onSetPopLane, onReparentEvent]);
+  }, [clientToDH, clientToLaneFloat, clientRectToLocal, isolatedExperimentId, laneByPop, onMovePop, onMoveEvent, onResizePop, onResizeEvent, onSetPopLane, onReparentEvent]);
 
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     const st = dragRef.current;
@@ -515,14 +589,6 @@ export default function Timeline(props: TimelineProps) {
       if (m.kind === 'marquee') {
         // Real drag → select enclosed experiments; a shift-click with no drag clears.
         onMarqueeSelect(st.moved ? popIdsInClientRect(st.startClient.x, st.startClient.y, e.clientX, e.clientY) : []);
-      } else if (m.kind === 'create-pop') {
-        // Only create on real drag — single click on empty space is a no-op now.
-        if (st.moved) {
-          const sd = st.startDH;
-          const a = sd.date <= dh.date ? sd.date : dh.date;
-          const b = sd.date <= dh.date ? dh.date : sd.date;
-          onCreatePop(a, b);
-        }
       } else if (m.kind === 'create-event') {
         const sd = st.startDH;
         const aDate = sd.date < dh.date || (sd.date === dh.date && sd.hour <= dh.hour) ? sd.date : dh.date;
@@ -550,7 +616,7 @@ export default function Timeline(props: TimelineProps) {
           const popId = m.popId;
           const evEl = target.closest('[data-ev-id]') as HTMLElement | null;
           if (evEl) onSelectEvent(evId, popId, evEl.getBoundingClientRect());
-        } else if (m.kind === 'create-pop' || m.kind === 'create-event' || m.kind === 'marquee') {
+        } else if (m.kind === 'create-event' || m.kind === 'marquee') {
           // Click on empty canvas (no drag) → tear down any open popover, details, or selection.
           onDeselect();
         }
@@ -560,7 +626,7 @@ export default function Timeline(props: TimelineProps) {
     setDragPreview(null);
     setMarquee(null);
     dragRef.current = null;
-  }, [onCreatePop, onCreateEvent, onSelectPop, onSelectEvent, onDeselect, onMarqueeSelect, popIdsInClientRect]);
+  }, [onCreateEvent, onSelectPop, onSelectEvent, onDeselect, onMarqueeSelect, popIdsInClientRect]);
 
   const onPointerCancel = useCallback(() => {
     cancelDrag();
@@ -585,7 +651,7 @@ export default function Timeline(props: TimelineProps) {
 
     const evEl = findClosest('[data-ev-id]');
     if (evEl && isolatedExperimentId && evEl.dataset.popId === isolatedExperimentId) {
-      onOpenEventDetails(evEl.dataset.evId!, evEl.dataset.popId!);
+      onRenameEvent(evEl.dataset.evId!, evEl.dataset.popId!);
       return;
     }
 
@@ -606,7 +672,7 @@ export default function Timeline(props: TimelineProps) {
     const dh = clientToDH(e.clientX, e.clientY);
     if (!dh) return;
     onCreatePop(dh.date, dh.date);
-  }, [clientToDH, isolatedExperimentId, onCreatePop, onExitIsolation, onOpenEventDetails, onOpenPopDetails]);
+  }, [clientToDH, isolatedExperimentId, onCreatePop, onExitIsolation, onRenameEvent, onOpenPopDetails]);
 
   // --- Pixel layout helpers ---
   const dateHourToPx = useCallback((date: string, hour: number) => {
@@ -662,6 +728,9 @@ export default function Timeline(props: TimelineProps) {
       <div className="absolute top-2 left-2 z-30 bg-white/90 backdrop-blur px-3 py-1.5 rounded-full shadow-sm border border-slate-200 text-xs font-bold text-slate-700 uppercase tracking-wider pointer-events-none">
         {floatingLabel}
       </div>
+
+      {/* Per-axis zoom */}
+      <ZoomControls zoomX={zoomX} zoomY={zoomY} onZoomX={stepZoomX} onZoomY={stepZoomY} />
 
       <div
         ref={scrollerRef}
@@ -832,21 +901,22 @@ export default function Timeline(props: TimelineProps) {
                     </span>
                   </div>
 
-                  {/* Resize handles — disabled in isolation */}
-                  {!isIsolated && (
-                    <>
-                      <div
-                        data-resize="pop-start"
-                        className={`absolute ${isHoriz ? 'left-0 top-0 bottom-0 w-2 cursor-col-resize' : 'top-0 left-0 right-0 h-2 cursor-row-resize'} hover:bg-black/10 rounded-l-xl`}
-                        style={{ touchAction: 'none' }}
-                      />
-                      <div
-                        data-resize="pop-end"
-                        className={`absolute ${isHoriz ? 'right-0 top-0 bottom-0 w-2 cursor-col-resize' : 'bottom-0 left-0 right-0 h-2 cursor-row-resize'} hover:bg-black/10 rounded-r-xl`}
-                        style={{ touchAction: 'none' }}
-                      />
-                    </>
-                  )}
+                  {/* Resize handles. Active in isolation too, so the experiment's own
+                      boundaries can be dragged while editing its events. When isolated they
+                      sit above the sub-events (z-20) so the very-edge handles stay grabbable;
+                      the interior still starts an event-creation drag. */}
+                  <>
+                    <div
+                      data-resize="pop-start"
+                      className={`absolute ${isIsolated ? 'z-20 ' : ''}${isHoriz ? 'left-0 top-0 bottom-0 w-2 cursor-col-resize' : 'top-0 left-0 right-0 h-2 cursor-row-resize'} hover:bg-black/10 rounded-l-xl`}
+                      style={{ touchAction: 'none' }}
+                    />
+                    <div
+                      data-resize="pop-end"
+                      className={`absolute ${isIsolated ? 'z-20 ' : ''}${isHoriz ? 'right-0 top-0 bottom-0 w-2 cursor-col-resize' : 'bottom-0 left-0 right-0 h-2 cursor-row-resize'} hover:bg-black/10 rounded-r-xl`}
+                      style={{ touchAction: 'none' }}
+                    />
+                  </>
 
                   {/* Sub-events */}
                   {popEvents.map(ev => {
@@ -922,7 +992,7 @@ export default function Timeline(props: TimelineProps) {
               );
             })()}
 
-            {/* Shift-drag marquee rectangle */}
+            {/* Drag-to-select marquee rectangle */}
             {marquee && (
               <div
                 className="absolute z-30 pointer-events-none rounded-md bg-indigo-500/10 border-2 border-indigo-400"

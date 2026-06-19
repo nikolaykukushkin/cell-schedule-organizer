@@ -23,13 +23,14 @@ export default function IsolationToolbar({ population, eventCount, onExit }: Pro
       </span>
       <button
         onClick={onExit}
-        aria-label="Exit isolation mode"
-        title="Exit (Esc)"
-        className="w-8 h-8 flex items-center justify-center rounded-lg bg-white/15 hover:bg-white/25 transition-colors flex-shrink-0"
+        aria-label="Done editing events"
+        title="Done (Esc)"
+        className="flex items-center gap-1.5 h-8 px-3.5 rounded-lg bg-white text-indigo-600 text-sm font-bold hover:bg-white/90 transition-colors flex-shrink-0"
       >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M12 4L4 12M4 4L12 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
+        Done
       </button>
     </div>
   );

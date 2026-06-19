@@ -1,10 +1,14 @@
 'use client';
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CellPopulation, SubEvent, densityUnit, platesLabel } from '@/types';
 
 interface BaseProps {
   anchor: DOMRect | null;
+  /** CSS selector of the bar/event this popover is anchored to. A press on that element is
+   *  left for the Timeline to handle (re-click no-op / double-click), so it doesn't close
+   *  the popover out from under the gesture. */
+  anchorSelector?: string;
   onClose: () => void;
   isMobile: boolean;
 }
@@ -26,6 +30,9 @@ interface PopProps extends BaseProps {
 interface EvProps extends BaseProps {
   kind: 'event';
   subEvent: SubEvent;
+  /** Open with the name field already in inline-edit mode (double-click rename). */
+  startRenaming: boolean;
+  onRename: (label: string) => void;
   onEditDetails: () => void;
   onDelete: () => void;
 }
@@ -37,7 +44,7 @@ export type ExperimentPopoverProps = PopProps | EvProps;
  * slides up as a bottom sheet on mobile.
  */
 export default function ExperimentPopover(props: ExperimentPopoverProps) {
-  const { anchor, onClose, isMobile } = props;
+  const { anchor, anchorSelector, onClose, isMobile } = props;
   const ref = useRef<HTMLDivElement>(null);
 
   // Position the popover relative to the anchor on desktop. Recomputed on every
@@ -63,7 +70,9 @@ export default function ExperimentPopover(props: ExperimentPopoverProps) {
       const target = e.target as HTMLElement;
       if (!ref.current) return;
       if (ref.current.contains(target)) return;
-      // Don't close if click was on the anchor bar (lets the user re-click to deselect via Timeline's onDeselect)
+      // Press on the popover's own anchor (bar/event) → leave it to the Timeline (re-click
+      // is a no-op, double-click renames / opens the editor) so the popover doesn't flash.
+      if (anchorSelector && target.closest(anchorSelector)) return;
       onClose();
     };
     window.addEventListener('keydown', onKey);
@@ -78,7 +87,7 @@ export default function ExperimentPopover(props: ExperimentPopoverProps) {
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('touchstart', onDown);
     };
-  }, [onClose]);
+  }, [onClose, anchorSelector]);
 
   const containerStyle: React.CSSProperties = isMobile
     ? {}
@@ -111,13 +120,89 @@ export default function ExperimentPopover(props: ExperimentPopoverProps) {
   }
 
   // Sub-event popover
-  const { subEvent: ev, onEditDetails, onDelete } = props;
+  const { subEvent: ev, startRenaming, onRename, onEditDetails, onDelete } = props;
   return (
-    <div ref={ref} className={containerClasses} style={containerStyle}>
+    <EventBody
+      subEvent={ev}
+      startRenaming={startRenaming}
+      onRename={onRename}
+      onEditDetails={onEditDetails}
+      onDelete={onDelete}
+      onClose={onClose}
+      containerRef={ref}
+      containerClasses={containerClasses}
+      containerStyle={containerStyle}
+    />
+  );
+}
+
+interface EventBodyProps {
+  subEvent: SubEvent;
+  startRenaming: boolean;
+  onRename: (label: string) => void;
+  onEditDetails: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  containerClasses: string;
+  containerStyle: React.CSSProperties;
+}
+
+function EventBody({
+  subEvent: ev, startRenaming, onRename, onEditDetails, onDelete, onClose,
+  containerRef, containerClasses, containerStyle,
+}: EventBodyProps) {
+  const [editing, setEditing] = useState(startRenaming);
+  const [value, setValue] = useState(ev.label);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Parent re-signals a rename (e.g. a double-click while the popover is already open) by
+  // flipping `startRenaming`. Sync it during render (React's "adjust state on prop change"
+  // pattern) rather than in an effect, which would cause a cascading re-render.
+  const [prevStart, setPrevStart] = useState(startRenaming);
+  if (startRenaming !== prevStart) {
+    setPrevStart(startRenaming);
+    if (startRenaming) { setEditing(true); setValue(ev.label); }
+  }
+
+  // Focus + select the field whenever we enter edit mode.
+  useEffect(() => {
+    if (editing) { inputRef.current?.focus(); inputRef.current?.select(); }
+  }, [editing]);
+
+  const commit = () => {
+    const next = value.trim();
+    if (next && next !== ev.label) onRename(next);
+    setEditing(false);
+  };
+  const cancel = () => { setValue(ev.label); setEditing(false); };
+
+  return (
+    <div ref={containerRef} className={containerClasses} style={containerStyle}>
       <div className="flex items-start gap-3 mb-3">
         <div className="w-2.5 h-10 rounded-full flex-shrink-0" style={{ backgroundColor: ev.color }} />
         <div className="flex-1 min-w-0">
-          <div className="text-sm font-bold text-slate-800 truncate">{ev.label || 'New event'}</div>
+          {editing ? (
+            <input
+              ref={inputRef}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); commit(); }
+                else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel(); }
+              }}
+              className="w-full text-sm font-bold text-slate-800 bg-slate-100 rounded-md px-1.5 py-1 outline-none ring-2 ring-indigo-400"
+            />
+          ) : (
+            <div
+              className="text-sm font-bold text-slate-800 truncate cursor-text"
+              onDoubleClick={() => setEditing(true)}
+              title="Double-click to rename"
+            >
+              {ev.label || 'New event'}
+            </div>
+          )}
         </div>
         <button
           onClick={onClose}
