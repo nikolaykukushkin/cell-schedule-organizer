@@ -51,4 +51,11 @@ npm run lint     # Run ESLint
 
 ## Deployment
 
-Target deployment is Vercel.
+Target deployment is Vercel. Pushing to `main` triggers a Vercel redeploy.
+
+## Git Repository
+
+- **Remote**: `origin` → https://github.com/nikolaykukushkin/cell-schedule-organizer
+- **Default branch**: `main` — commits land directly on `main` (solo project), which auto-deploys to Vercel.
+- The repo root is the project directory itself (`cell-schedule-organizer/`).
+- A SessionStart hook runs `git pull --ff-only` automatically so each session starts from the latest remote (the app also syncs data across devices via Neon Postgres — see the Neon sync memory).
