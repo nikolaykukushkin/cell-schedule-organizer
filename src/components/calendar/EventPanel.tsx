@@ -306,7 +306,16 @@ export default function EventPanel({
             <div><Label>Experimenter</Label><AutocompleteInput value={localPop.experimenter} onChange={v => setLocalPop({ ...localPop, experimenter: v })} suggestions={storage.getAllOperatorNames()} placeholder="e.g. Nikolay" /></div>
             <div>
               <Label>Plate Type</Label>
-              <select autoComplete="off" value={localPop.plateType} onChange={e => setLocalPop({ ...localPop, plateType: e.target.value as PlateType })} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none">
+              <select autoComplete="off" value={localPop.plateType} onChange={e => {
+                // Keep M/cm² constant across plate types: rescale the per-well/dish density by area.
+                const plateType = e.target.value as PlateType;
+                const d = parseFloat(localPop.cellDensity);
+                const cellDensity = Number.isNaN(d) || !/^\s*[\d.]+\s*$/.test(localPop.cellDensity)
+                  ? localPop.cellDensity
+                  : formatDensity(d / PLATE_AREA_CM2[localPop.plateType] * PLATE_AREA_CM2[plateType]);
+                setAreaText(null);
+                setLocalPop({ ...localPop, plateType, cellDensity });
+              }} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none">
                 {Object.entries(PLATE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
             </div>
