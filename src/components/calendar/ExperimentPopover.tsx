@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CellPopulation, SubEvent, densityUnit, platesLabel } from '@/types';
+import { CellPopulation, SubEvent, PLATE_LABELS, densityUnit } from '@/types';
 
 interface BaseProps {
   anchor: DOMRect | null;
@@ -16,15 +16,9 @@ interface BaseProps {
 interface PopProps extends BaseProps {
   kind: 'pop';
   population: CellPopulation;
-  eventCount: number;
-  /** Templates of existing events. Duration and offset-from-parent-end are taken from
-   *  the most recent occurrence so a paste lands in the same place relative to harvest. */
-  eventTemplates: { label: string; color: string; durationH: number; offsetFromEndH: number }[];
-  onEnterIsolation: () => void;
   onEditDetails: () => void;
   onDelete: () => void;
   onRepeatNextWeek: () => void;
-  onAddQuickEvent: (label: string, color: string, durationH: number, offsetFromEndH: number) => void;
 }
 
 interface EvProps extends BaseProps {
@@ -100,17 +94,13 @@ export default function ExperimentPopover(props: ExperimentPopoverProps) {
     : 'fixed z-50 bg-white rounded-2xl shadow-2xl border border-slate-200 p-3';
 
   if (props.kind === 'pop') {
-    const { population: p, eventCount, eventTemplates, onEnterIsolation, onEditDetails, onDelete, onRepeatNextWeek, onAddQuickEvent } = props;
+    const { population: p, onEditDetails, onDelete, onRepeatNextWeek } = props;
     return (
       <PopBody
         population={p}
-        eventCount={eventCount}
-        eventTemplates={eventTemplates}
-        onEnterIsolation={onEnterIsolation}
         onEditDetails={onEditDetails}
         onDelete={onDelete}
         onRepeatNextWeek={onRepeatNextWeek}
-        onAddQuickEvent={onAddQuickEvent}
         onClose={onClose}
         containerRef={ref}
         containerClasses={containerClasses}
@@ -232,13 +222,9 @@ function EventBody({
 
 interface PopBodyProps {
   population: CellPopulation;
-  eventCount: number;
-  eventTemplates: { label: string; color: string; durationH: number; offsetFromEndH: number }[];
-  onEnterIsolation: () => void;
   onEditDetails: () => void;
   onDelete: () => void;
   onRepeatNextWeek: () => void;
-  onAddQuickEvent: (label: string, color: string, durationH: number, offsetFromEndH: number) => void;
   onClose: () => void;
   containerRef: React.RefObject<HTMLDivElement | null>;
   containerClasses: string;
@@ -246,8 +232,8 @@ interface PopBodyProps {
 }
 
 function PopBody({
-  population: p, eventTemplates,
-  onEnterIsolation, onEditDetails, onDelete, onRepeatNextWeek, onAddQuickEvent, onClose,
+  population: p,
+  onEditDetails, onDelete, onRepeatNextWeek, onClose,
   containerRef, containerClasses, containerStyle,
 }: PopBodyProps) {
   return (
@@ -256,10 +242,6 @@ function PopBody({
         <div className="w-2.5 h-10 rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
         <div className="flex-1 min-w-0">
           <div className="text-sm font-bold text-slate-800 truncate">{p.name || 'Untitled'}</div>
-          <div className="text-xs text-slate-400 mt-0.5 truncate">
-            {platesLabel(p.plateType, p.plateCount)}
-            {p.cellDensity && ` · ${p.cellDensity} ${densityUnit(p.plateType)}`}
-          </div>
           {p.experimentLabel && (
             <div className="text-[10px] font-bold text-slate-400 mt-0.5 uppercase tracking-wider">{p.experimentLabel}</div>
           )}
@@ -273,34 +255,12 @@ function PopBody({
         </button>
       </div>
 
-      <div className="mb-3">
-        <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5 px-1">Add event</div>
-        <div className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden">
-          {eventTemplates.length > 0 && (
-            <div className="max-h-24 overflow-y-auto">
-              {eventTemplates.map(t => (
-                <button
-                  key={t.label}
-                  onClick={() => onAddQuickEvent(t.label, t.color, t.durationH, t.offsetFromEndH)}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-white transition-colors border-b border-slate-100 last:border-b-0"
-                >
-                  <span className="w-3 h-3 rounded-full flex-shrink-0 ring-1 ring-black/5" style={{ backgroundColor: t.color }} />
-                  <span className="flex-1 truncate text-xs font-semibold text-slate-700">{t.label}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          <button
-            onClick={onEnterIsolation}
-            className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-indigo-600 hover:bg-indigo-50 transition-colors"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
-              <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-            </svg>
-            <span className="flex-1 text-xs font-bold">New</span>
-          </button>
-        </div>
-      </div>
+      <dl className="mb-3 rounded-xl border border-slate-200 bg-slate-50/60 divide-y divide-slate-100 text-xs">
+        <DetailRow label="Cell line" value={p.cellLine} />
+        <DetailRow label="Plate type" value={PLATE_LABELS[p.plateType] ?? p.plateType} />
+        <DetailRow label="Plate count" value={String(p.plateCount)} />
+        <DetailRow label="Density" value={p.cellDensity ? `${p.cellDensity} ${densityUnit(p.plateType)}` : ''} />
+      </dl>
 
       <button
         onClick={onRepeatNextWeek}
@@ -326,6 +286,16 @@ function PopBody({
           Delete
         </button>
       </div>
+    </div>
+  );
+}
+
+
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 px-2.5 py-1.5">
+      <dt className="text-slate-400 font-semibold flex-shrink-0">{label}</dt>
+      <dd className={`truncate text-right font-semibold ${value ? 'text-slate-700' : 'text-slate-300'}`}>{value || '—'}</dd>
     </div>
   );
 }

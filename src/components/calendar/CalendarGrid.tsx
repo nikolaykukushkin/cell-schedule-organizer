@@ -391,12 +391,12 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
   }, []);
 
   const handleOpenPopDetails = useCallback((popId: string) => {
-    // Double-click a bar → straight into the event editor (isolation). Extended details are
-    // reachable only via "Open details" in the mini popover.
-    setEditingFullPanel(false);
+    // Double-click opens edit (isolation) mode and the extended details panel together.
+    const popEl = document.querySelector(`[data-pop-id="${popId}"]`) as HTMLElement | null;
     setAddPanelDismissed(false);
     setIsolatedExperimentId(popId);
-    setPopover(null);
+    setEditingFullPanel(true);
+    setPopover({ kind: 'pop', id: popId, popId, anchor: popEl?.getBoundingClientRect() ?? new DOMRect() });
   }, []);
 
   const handleAddQuickEvent = useCallback((popId: string, label: string, color: string, durationH: number, offsetFromEndH: number) => {
@@ -429,9 +429,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
 
   const handleEnterIsolationFor = useCallback((popId: string) => {
     setIsolatedExperimentId(popId);
-    setEditingFullPanel(false);
     setAddPanelDismissed(false);
-    setPopover(null);
   }, []);
 
   // Double-click an event → open its mini popover with the name field in inline-edit mode.
@@ -580,15 +578,17 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
     if (isolatedExperimentId === id) setIsolatedExperimentId(null);
   }, [isolatedExperimentId]);
 
-  const handleRepeatNextWeek = useCallback((popId: string) => {
+  const handleRepeatOn = useCallback((popId: string, newStartDate: string) => {
     const pop = populationsRef.current.find(p => p.id === popId);
-    if (!pop) return;
+    if (!pop || !newStartDate) return;
+    const shift = daysBetween(pop.startDate, newStartDate);
     const newPopId = crypto.randomUUID();
     const newPop: CellPopulation = {
       ...pop,
       id: newPopId,
-      startDate: addDays(pop.startDate, 7),
-      endDate: addDays(pop.endDate, 7),
+      startDate: addDays(pop.startDate, shift),
+      endDate: addDays(pop.endDate, shift),
+      lane: undefined,
       // A repeat is a fresh passage — clear the inherited passage number.
       passage: '',
       color: POPULATION_COLORS[(populationsRef.current.length) % POPULATION_COLORS.length],
@@ -598,8 +598,8 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
       ...ev,
       id: crypto.randomUUID(),
       populationId: newPopId,
-      startDate: addDays(ev.startDate, 7),
-      endDate: addDays(ev.endDate, 7),
+      startDate: addDays(ev.startDate, shift),
+      endDate: addDays(ev.endDate, shift),
     }));
     setPopulations(prev => [...prev, newPop]);
     setEvents(prev => [...prev, ...newEvents]);
@@ -795,7 +795,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
         onReparentEvent={handleReparentEvent}
         onDeselect={closePopover}
         onMarqueeSelect={handleMarqueeSelect}
-        onExitIsolation={() => { setIsolatedExperimentId(null); setPopover(null); }}
+        onExitIsolation={() => { setIsolatedExperimentId(null); closePopover(); }}
         onLayoutChange={refreshPopoverAnchor}
         scrollToTodayToken={scrollToTodayToken}
       />
@@ -809,15 +809,9 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
             anchorSelector={`[data-pop-id="${popover.popId}"]`}
             isMobile={isMobile}
             population={popoverPopDisplay!}
-            eventCount={popoverEventCount}
-            eventTemplates={storage.getAllSubEventTemplates()}
-            onEnterIsolation={() => handleEnterIsolationFor(popover.popId)}
-            onEditDetails={() => setEditingFullPanel(true)}
+            onEditDetails={() => handleOpenPopDetails(popover.popId)}
             onDelete={() => handleDeletePopulation(popover.popId)}
-            onRepeatNextWeek={() => { handleRepeatNextWeek(popover.popId); closePopover(); }}
-            onAddQuickEvent={(label, color, durationH, offsetFromEndH) =>
-              handleAddQuickEvent(popover.popId, label, color, durationH, offsetFromEndH)
-            }
+            onRepeatNextWeek={() => { const p = populationsRef.current.find(x => x.id === popover.popId); if (p) handleRepeatOn(p.id, addDays(p.startDate, 7)); closePopover(); }}
             onClose={closePopover}
           />
         ) : popoverEv ? (
@@ -848,7 +842,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
           onDeleteSubEvent={handleDeleteEvent}
           onUpdatePopulation={handleUpdatePopulation}
           onDeletePopulation={handleDeletePopulation}
-          onRepeatNextWeek={handleRepeatNextWeek}
+          onRepeatOn={handleRepeatOn}
           onEnterIsolation={handleEnterIsolationFor}
           onAddQuickEvent={handleAddQuickEvent}
           eventTemplates={storage.getAllSubEventTemplates()}

@@ -1,9 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SubEvent, CellPopulation, Operator, PlateType, PLATE_LABELS, densityUnit } from '@/types';
+import { SubEvent, CellPopulation, Operator, PlateType, PLATE_LABELS, PLATE_AREA_CM2, densityUnit, formatDensity } from '@/types';
+import { addDays } from '@/lib/dates';
 import * as storage from '@/lib/storage';
 import PlateVisual from './PlateVisual';
+import CountInput from './CountInput';
 import AutocompleteInput from './AutocompleteInput';
 import { pushToLabBook } from '@/lib/github-sync';
 
@@ -51,7 +53,8 @@ interface EventPanelProps {
   onDeleteSubEvent: (id: string) => void;
   onUpdatePopulation: (pop: CellPopulation) => void;
   onDeletePopulation: (id: string) => void;
-  onRepeatNextWeek: (popId: string) => void;
+  /** Duplicate the experiment (with its events) so the copy is seeded on `newStartDate`. */
+  onRepeatOn: (popId: string, newStartDate: string) => void;
   onEnterIsolation: (popId: string) => void;
   onAddQuickEvent: (popId: string, label: string, color: string, durationH: number, offsetFromEndH: number) => void;
   eventTemplates: { label: string; color: string; durationH: number; offsetFromEndH: number }[];
@@ -163,7 +166,7 @@ export default function EventPanel({
   onDeleteSubEvent,
   onUpdatePopulation,
   onDeletePopulation,
-  onRepeatNextWeek,
+  onRepeatOn,
   onEnterIsolation,
   onAddQuickEvent,
   eventTemplates,
@@ -171,6 +174,15 @@ export default function EventPanel({
   isMobile,
 }: EventPanelProps) {
   const [labBookStatus, setLabBookStatus] = useState<'idle' | 'pushing' | 'done' | 'error'>('idle');
+  // Raw text of the M/cm² field while the user is typing in it (null = derive from M/well).
+  const [areaText, setAreaText] = useState<string | null>(null);
+  // Seed date for "Repeat on…" — defaults to one week after this experiment's seed date.
+  const [repeatDate, setRepeatDate] = useState(() => (population ? addDays(population.startDate, 7) : ''));
+  const [repeatForId, setRepeatForId] = useState(population?.id ?? null);
+  if ((population?.id ?? null) !== repeatForId) {
+    setRepeatForId(population?.id ?? null);
+    setRepeatDate(population ? addDays(population.startDate, 7) : '');
+  }
 
   // Local buffered state — edits are instant, flushed to parent after 300ms idle
   const [localEvent, setLocalEvent] = useLocalState<SubEvent>(subEvent, onUpdateSubEvent);
@@ -298,8 +310,28 @@ export default function EventPanel({
                 {Object.entries(PLATE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </select>
             </div>
-            <div><Label>Plate Count</Label><Input type="number" min={1} value={localPop.plateCount} onChange={e => setLocalPop({ ...localPop, plateCount: parseInt((e.target as HTMLInputElement).value) || 1 })} /></div>
-            <div><Label>Density ({densityUnit(localPop.plateType)})</Label><Input type="text" value={localPop.cellDensity} onChange={e => setLocalPop({ ...localPop, cellDensity: (e.target as HTMLInputElement).value })} placeholder="e.g. 0.5" /></div>
+            <div>
+              <Label>Plate Count</Label>
+              <CountInput min={1} value={localPop.plateCount} onChange={n => setLocalPop({ ...localPop, plateCount: n })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none transition-all" />
+            </div>
+            <div><Label>Density ({densityUnit(localPop.plateType)})</Label><Input type="text" inputMode="decimal" value={localPop.cellDensity} onChange={e => { setAreaText(null); setLocalPop({ ...localPop, cellDensity: (e.target as HTMLInputElement).value }); }} placeholder="e.g. 0.5" /></div>
+            <div>
+              <Label>Density (M/cm²)</Label>
+              <Input
+                type="text"
+                inputMode="decimal"
+                value={areaText ?? (Number.isNaN(parseFloat(localPop.cellDensity)) ? '' : formatDensity(parseFloat(localPop.cellDensity) / PLATE_AREA_CM2[localPop.plateType]))}
+                onChange={e => {
+                  const t = (e.target as HTMLInputElement).value;
+                  setAreaText(t);
+                  const n = parseFloat(t);
+                  setLocalPop({ ...localPop, cellDensity: t.trim() === '' ? '' : Number.isNaN(n) ? localPop.cellDensity : formatDensity(n * PLATE_AREA_CM2[localPop.plateType]) });
+                }}
+                onBlur={() => setAreaText(null)}
+                placeholder="e.g. 0.05"
+              />
+              <div className="text-[10px] text-slate-400 mt-0.5">{PLATE_AREA_CM2[localPop.plateType]} cm² per {densityUnit(localPop.plateType).slice(2)}</div>
+            </div>
           </div>
           <div className="flex items-center justify-center bg-slate-50 rounded-lg p-2">
             <PlateVisual plateType={localPop.plateType} count={localPop.plateCount} size={34} />
@@ -378,9 +410,23 @@ export default function EventPanel({
             <button onClick={handleAddToLabBook} disabled={labBookStatus === 'pushing'} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-100 transition-colors disabled:opacity-50">
               {labBookStatus === 'pushing' ? 'Pushing...' : labBookStatus === 'done' ? 'Added!' : labBookStatus === 'error' ? 'Failed — retry?' : 'Add to Lab Book'}
             </button>
-            <button onClick={() => onRepeatNextWeek(localPop.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 transition-colors">
-              Repeat Next Week
-            </button>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => onRepeatOn(localPop.id, repeatDate)}
+                disabled={!repeatDate}
+                className="flex-1 px-3 py-2 rounded-lg text-sm font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 transition-colors disabled:opacity-50 whitespace-nowrap"
+              >
+                Repeat on
+              </button>
+              <input
+                type="date"
+                autoComplete="off"
+                value={repeatDate}
+                onChange={e => setRepeatDate(e.target.value)}
+                aria-label="Seed date for the repeat"
+                className="w-[9.5rem] border border-indigo-100 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none"
+              />
+            </div>
             <button onClick={() => onDeletePopulation(localPop.id)} className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 transition-colors">
               Delete Experiment
             </button>

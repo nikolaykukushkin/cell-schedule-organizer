@@ -1,5 +1,6 @@
 export type PlateType =
   | '10cm'
+  | '15cm'
   | '6-well'
   | '8-well'
   | '12-well'
@@ -80,6 +81,7 @@ export interface Operator {
 
 export const PLATE_LABELS: Record<PlateType, string> = {
   '10cm': '10 cm Dish',
+  '15cm': '15 cm Dish',
   '6-well': '6-Well Plate',
   '8-well': '8-Well Plate',
   '12-well': '12-Well Plate',
@@ -92,6 +94,29 @@ export const PLATE_LABELS: Record<PlateType, string> = {
   'T75': 'T-75 Flask',
   'T175': 'T-175 Flask',
 };
+
+/** Approximate growth area per well / dish / flask, in cm² (standard TC plasticware). */
+export const PLATE_AREA_CM2: Record<PlateType, number> = {
+  '10cm': 55,
+  '15cm': 145,
+  '6-well': 9.5,
+  '8-well': 0.8,
+  '12-well': 3.8,
+  '24-well': 1.9,
+  '48-well': 0.95,
+  '96-well': 0.32,
+  '35mm': 8.8,
+  '60mm': 21.5,
+  'T25': 25,
+  'T75': 75,
+  'T175': 175,
+};
+
+/** Round to 4 significant figures and drop trailing zeros. */
+export function formatDensity(n: number): string {
+  if (!Number.isFinite(n)) return '';
+  return String(Number(n.toPrecision(4)));
+}
 
 export function densityUnit(plateType: PlateType): string {
   if (plateType.endsWith('well')) return 'M/well';
@@ -110,6 +135,7 @@ export function platesLabel(plateType: PlateType, count: number): string {
 /** Compact plate codes for tight contexts like calendar bars (e.g. "24W", "T75"). */
 export const PLATE_ABBREV: Record<PlateType, string> = {
   '10cm': '10cm',
+  '15cm': '15cm',
   '6-well': '6W',
   '8-well': '8W',
   '12-well': '12W',

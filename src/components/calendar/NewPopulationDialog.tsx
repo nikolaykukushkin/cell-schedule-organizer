@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { PlateType, PLATE_LABELS, densityUnit } from '@/types';
 import * as storage from '@/lib/storage';
+import CountInput from './CountInput';
 import PlateVisual from './PlateVisual';
 import AutocompleteInput from './AutocompleteInput';
 
@@ -131,13 +132,11 @@ export default function NewPopulationDialog({ startDate, endDate, onConfirm, onC
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Plate Count</label>
-              <input
-                type="number"
-                autoComplete="off"
+              <CountInput
                 min={1}
                 max={100}
                 value={plateCount}
-                onChange={e => setPlateCount(parseInt(e.target.value) || 1)}
+                onChange={setPlateCount}
                 className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-800 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none"
               />
             </div>
