@@ -1,7 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CellPopulation, SubEvent, PLATE_LABELS, densityUnit } from '@/types';
+import { CellPopulation, SubEvent, PlateType, PLATE_LABELS, densityUnit, rescaleDensity } from '@/types';
+import * as storage from '@/lib/storage';
+import AutocompleteInput from './AutocompleteInput';
+import CountInput from './CountInput';
 
 interface BaseProps {
   anchor: DOMRect | null;
@@ -16,6 +19,8 @@ interface BaseProps {
 interface PopProps extends BaseProps {
   kind: 'pop';
   population: CellPopulation;
+  /** Inline edits from the preview (cell line, plate type/count, density). */
+  onUpdate: (patch: Partial<CellPopulation>) => void;
   onEditDetails: () => void;
   onDelete: () => void;
   onRepeatNextWeek: () => void;
@@ -94,10 +99,11 @@ export default function ExperimentPopover(props: ExperimentPopoverProps) {
     : 'fixed z-50 bg-white rounded-2xl shadow-2xl border border-slate-200 p-3';
 
   if (props.kind === 'pop') {
-    const { population: p, onEditDetails, onDelete, onRepeatNextWeek } = props;
+    const { population: p, onUpdate, onEditDetails, onDelete, onRepeatNextWeek } = props;
     return (
       <PopBody
         population={p}
+        onUpdate={onUpdate}
         onEditDetails={onEditDetails}
         onDelete={onDelete}
         onRepeatNextWeek={onRepeatNextWeek}
@@ -222,6 +228,7 @@ function EventBody({
 
 interface PopBodyProps {
   population: CellPopulation;
+  onUpdate: (patch: Partial<CellPopulation>) => void;
   onEditDetails: () => void;
   onDelete: () => void;
   onRepeatNextWeek: () => void;
@@ -233,7 +240,7 @@ interface PopBodyProps {
 
 function PopBody({
   population: p,
-  onEditDetails, onDelete, onRepeatNextWeek, onClose,
+  onUpdate, onEditDetails, onDelete, onRepeatNextWeek, onClose,
   containerRef, containerClasses, containerStyle,
 }: PopBodyProps) {
   return (
@@ -256,10 +263,43 @@ function PopBody({
       </div>
 
       <dl className="mb-3 rounded-xl border border-slate-200 bg-slate-50/60 divide-y divide-slate-100 text-xs">
-        <DetailRow label="Cell line" value={p.cellLine} />
-        <DetailRow label="Plate type" value={PLATE_LABELS[p.plateType] ?? p.plateType} />
-        <DetailRow label="Plate count" value={String(p.plateCount)} />
-        <DetailRow label="Density" value={p.cellDensity ? `${p.cellDensity} ${densityUnit(p.plateType)}` : ''} />
+        <DetailRow label="Cell line">
+          <AutocompleteInput
+            value={p.cellLine}
+            onChange={v => onUpdate({ cellLine: v })}
+            suggestions={storage.getAllCellLines()}
+            placeholder="—"
+            className={FIELD}
+          />
+        </DetailRow>
+        <DetailRow label="Plate type">
+          <select
+            value={p.plateType}
+            onChange={e => {
+              const plateType = e.target.value as PlateType;
+              // Keep M/cm² constant when switching plates.
+              onUpdate({ plateType, cellDensity: rescaleDensity(p.cellDensity, p.plateType, plateType) });
+            }}
+            className={`${FIELD} cursor-pointer`}
+          >
+            {Object.entries(PLATE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+        </DetailRow>
+        <DetailRow label="Plate count">
+          <CountInput min={1} value={p.plateCount} onChange={n => onUpdate({ plateCount: n })} className={FIELD} />
+        </DetailRow>
+        <DetailRow label="Density" unit={densityUnit(p.plateType)}>
+          <input
+            type="text"
+            inputMode="decimal"
+            autoComplete="off"
+            spellCheck={false}
+            value={p.cellDensity}
+            onChange={e => onUpdate({ cellDensity: e.target.value })}
+            placeholder="—"
+            className={FIELD}
+          />
+        </DetailRow>
       </dl>
 
       <button
@@ -291,11 +331,17 @@ function PopBody({
 }
 
 
-function DetailRow({ label, value }: { label: string; value: string }) {
+/** Borderless inline field that reveals itself on hover/focus. */
+const FIELD = 'w-full min-w-0 text-right text-xs font-semibold text-slate-700 placeholder:text-slate-300 bg-transparent rounded-md px-1.5 py-0.5 border border-transparent hover:border-slate-200 hover:bg-white focus:bg-white focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 outline-none transition-colors';
+
+function DetailRow({ label, unit, children }: { label: string; unit?: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-baseline justify-between gap-3 px-2.5 py-1.5">
+    <div className="flex items-center justify-between gap-2 px-2.5 py-1">
       <dt className="text-slate-400 font-semibold flex-shrink-0">{label}</dt>
-      <dd className={`truncate text-right font-semibold ${value ? 'text-slate-700' : 'text-slate-300'}`}>{value || '—'}</dd>
+      <dd className="flex items-center gap-1 min-w-0 flex-1 justify-end">
+        <div className="min-w-0 flex-1 max-w-[9.5rem]">{children}</div>
+        {unit && <span className="text-[10px] text-slate-400 font-semibold flex-shrink-0">{unit}</span>}
+      </dd>
     </div>
   );
 }

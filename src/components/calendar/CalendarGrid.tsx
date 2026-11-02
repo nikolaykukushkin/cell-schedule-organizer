@@ -809,6 +809,7 @@ export default function CalendarGrid({ experimentId, syncStatus = 'idle' }: Cale
             anchorSelector={`[data-pop-id="${popover.popId}"]`}
             isMobile={isMobile}
             population={popoverPopDisplay!}
+            onUpdate={patch => setPopulations(prev => prev.map(p => (p.id === popover.popId ? { ...p, ...patch } : p)))}
             onEditDetails={() => handleOpenPopDetails(popover.popId)}
             onDelete={() => handleDeletePopulation(popover.popId)}
             onRepeatNextWeek={() => { const p = populationsRef.current.find(x => x.id === popover.popId); if (p) handleRepeatOn(p.id, addDays(p.startDate, 7)); closePopover(); }}

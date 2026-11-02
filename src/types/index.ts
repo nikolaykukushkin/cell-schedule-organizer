@@ -118,6 +118,15 @@ export function formatDensity(n: number): string {
   return String(Number(n.toPrecision(4)));
 }
 
+/** Per-well/dish density after switching plate type, holding M/cm² constant.
+ *  Non-numeric densities (e.g. "0.5-1") are returned unchanged. */
+export function rescaleDensity(density: string, from: PlateType, to: PlateType): string {
+  if (!/^\s*[\d.]+\s*$/.test(density)) return density;
+  const d = parseFloat(density);
+  if (Number.isNaN(d)) return density;
+  return formatDensity(d / PLATE_AREA_CM2[from] * PLATE_AREA_CM2[to]);
+}
+
 export function densityUnit(plateType: PlateType): string {
   if (plateType.endsWith('well')) return 'M/well';
   if (plateType.startsWith('T')) return 'M/flask';

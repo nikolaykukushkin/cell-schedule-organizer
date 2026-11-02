@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SubEvent, CellPopulation, Operator, PlateType, PLATE_LABELS, PLATE_AREA_CM2, densityUnit, formatDensity } from '@/types';
+import { SubEvent, CellPopulation, Operator, PlateType, PLATE_LABELS, PLATE_AREA_CM2, densityUnit, formatDensity, rescaleDensity } from '@/types';
 import { addDays } from '@/lib/dates';
 import * as storage from '@/lib/storage';
 import PlateVisual from './PlateVisual';
@@ -309,10 +309,7 @@ export default function EventPanel({
               <select autoComplete="off" value={localPop.plateType} onChange={e => {
                 // Keep M/cm² constant across plate types: rescale the per-well/dish density by area.
                 const plateType = e.target.value as PlateType;
-                const d = parseFloat(localPop.cellDensity);
-                const cellDensity = Number.isNaN(d) || !/^\s*[\d.]+\s*$/.test(localPop.cellDensity)
-                  ? localPop.cellDensity
-                  : formatDensity(d / PLATE_AREA_CM2[localPop.plateType] * PLATE_AREA_CM2[plateType]);
+                const cellDensity = rescaleDensity(localPop.cellDensity, localPop.plateType, plateType);
                 setAreaText(null);
                 setLocalPop({ ...localPop, plateType, cellDensity });
               }} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-sm text-slate-800 bg-white focus:border-indigo-400 outline-none">
